@@ -1,37 +1,80 @@
-# muesli
+<p align="center">
+  <img src="packaging/dev.muesli.Muesli.svg" width="112" alt="muesli icon: an alpine ridge over a green meadow">
+</p>
 
-**Local AI meeting notes for Linux.** muesli notices when you join a Zoom or Discord call,
-records it, and when you hang up hands you a clean set of notes: decisions, action items,
-a speaker-labelled transcript, and a suggested title. No bot joins your call, and everything
-except transcription and note writing happens on your machine.
+<h1 align="center">muesli</h1>
 
-Think Granola, but native to Linux, open source, and light enough to forget it's running.
+<p align="center">
+  <b>Your meetings, written up before you've closed the call.</b><br>
+  Local AI meeting notes for Linux. No bot in the call, no subscription, no Electron.
+</p>
 
-![muesli: notes and transcript for a meeting](docs/screenshots/notes-and-transcript.png)
+<p align="center">
+  <img alt="Linux" src="https://img.shields.io/badge/platform-Linux-2147A6">
+  <img alt="Rust" src="https://img.shields.io/badge/built%20with-Rust-1B2024">
+  <img alt="GTK4" src="https://img.shields.io/badge/UI-GTK4%20%2B%20libadwaita-93AA6E">
+  <img alt="OpenRouter" src="https://img.shields.io/badge/models-OpenRouter-6B757C">
+  <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-C9D5DE">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/notes-and-transcript.png" alt="muesli: enhanced notes and a speaker-labelled transcript for a meeting">
+</p>
+
+Join a Zoom or Discord call and muesli quietly starts taking notes. Jot a few bullets if you
+like, or don't. Hang up, and a minute later you have a titled meeting with decisions, action
+items with owners, and a transcript that knows who said what.
+
+It runs on your machine, listens the way you already do (your mic and your speakers), and
+never joins the call as a participant. You bring an OpenRouter key and pay a few cents per
+meeting, not a monthly fee.
+
+## How it feels
+
+1. **Join a call.** muesli spots it within seconds and starts recording, or asks first if you
+   prefer. A timer appears in your bar.
+2. **Take notes, or don't.** Type rough bullets in the app while you talk. They stay yours,
+   word for word.
+3. **Hang up.** Echo is removed, silence trimmed, speech transcribed, and your bullets are
+   filled in with what was decided and who's doing what. Pick a suggested title and you're done.
+
+## Why muesli
+
+| | muesli | Granola | Meeting bots (Otter, Fireflies, …) |
+|---|---|---|---|
+| Runs on Linux | **Yes, natively** | No (macOS, Windows) | Browser only |
+| Joins your call as a participant | **No** | No | Yes |
+| Works with Discord | **Yes** | No | Varies |
+| Open source | **Yes, MIT** | No | No |
+| Choose your own models | **Any model on OpenRouter** | No | No |
+| Pricing | **Pay per use, ~$0.10–0.30 per hour** | Subscription | Subscription |
+| Where your notes live | **On your machine** | Their cloud | Their cloud |
 
 ## Features
 
-- **Automatic call detection.** Zoom and Discord, as native apps or in the browser.
-  Detection is event-driven (PipeWire tells muesli when an app opens your mic), so idle
+- **Hands-free call detection.** Zoom and Discord, as native apps or in the browser.
+  PipeWire tells muesli the moment an app opens your mic, so there is no polling and idle
   costs nothing.
-- **Record automatically or ask first.** One setting: either recording starts and you can
-  stop or discard it, or muesli asks and waits for you. Per-app overrides included.
-- **Works on speakers, not just headphones.** Your mic and the call audio are recorded
-  separately, and WebRTC echo cancellation removes the call from your mic afterwards
-  (about −26 dB on a real call), so the other side doesn't show up twice.
-- **Your notes, filled in.** Jot bullets during the call; afterwards muesli keeps them as
-  written and fills in context, decisions and to-dos from the transcript.
-- **Name it after the call.** Title suggestions from what was actually said, plus a
-  plain fallback ("Zoom call · Oct 17, 13:25").
-- **Speaker-labelled transcript.** "You" comes from your mic; other people are separated by
-  the transcription model and named when the conversation makes it clear. Rename or merge
-  speakers with a click, and copy the transcript as plain text.
-- **Ask about a meeting.** Questions answered from that meeting's notes and transcript,
-  with a model picker (Claude, GPT, Gemini, Grok, DeepSeek, or any OpenRouter model).
-- **Omarchy bar widget.** Recording timer, Record / Ignore and Stop / Discard, and naming,
-  right from the bar.
-- **Lightweight.** A Rust background service that idles at about 11 MB of memory and 0% CPU;
-  a native GTK4 / libadwaita app; no Electron, no webview.
+- **Auto-record or ask first.** Either recording starts and you can stop or discard it, or
+  muesli asks and waits. Override it per app.
+- **Built for speakers, not just headphones.** Your mic and the call are recorded as separate
+  channels, and WebRTC echo cancellation strips the call out of your mic afterwards
+  (about −26 dB on a real call), so nobody is transcribed twice.
+- **Your notes, filled in.** Your own bullets are kept exactly as written; the AI adds context,
+  decisions and to-dos underneath, visibly marked as its additions.
+- **Name it when it's over.** Title suggestions from what was actually said, one click to accept.
+- **A transcript that knows who's talking.** "You" comes from your mic; other voices are
+  separated by the transcription model and named when the conversation makes it clear.
+  Rename or merge speakers with a click, and copy the whole transcript as text.
+- **Ask your meeting.** "What did we decide about Windows?" Answers come from that meeting's
+  notes and transcript, using the model you pick: Claude, GPT, Gemini, Grok, DeepSeek, or
+  anything else on OpenRouter.
+- **Lives in your Omarchy bar.** Recording timer, Record / Ignore, Stop / Discard and naming,
+  styled by your current theme.
+- **Featherweight.** The background service idles at about 11 MB of memory and 0% CPU. The app
+  is native GTK4 / libadwaita. No Electron, no webview, no muesli account.
+- **Crash-proof recording.** Audio is written in small Opus segments that survive a crash or a
+  dead battery; processing picks up where it left off.
 
 ## Screenshots
 
@@ -39,8 +82,8 @@ Think Granola, but native to Linux, open source, and light enough to forget it's
 |---|---|
 | ![Naming a meeting after the call, with suggested titles and processing steps](docs/screenshots/name-this-meeting.png) | ![The notes app in dark mode](docs/screenshots/dark-mode.png) |
 
-The Omarchy bar widget asking to record, recording, and naming a finished call (it uses
-your current Omarchy theme):
+The Omarchy bar widget asking to record, recording, and naming a finished call, in your
+current Omarchy theme:
 
 ![Omarchy bar panels: call detected, recording, notes ready](docs/screenshots/omarchy-bar-panels.png)
 
@@ -82,7 +125,9 @@ PipeWire events ──► detector ──► record / ask ──► recorder: yo
 Developed and tested on [Omarchy](https://omarchy.org) (Arch + Hyprland). Other distros and
 desktops should mostly work, minus browser-call detection outside Hyprland.
 
-## Install
+## Get started
+
+On Omarchy or Arch:
 
 ```bash
 git clone https://github.com/sepehr500/muesli && cd muesli
