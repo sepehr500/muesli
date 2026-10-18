@@ -1229,11 +1229,11 @@ impl Win {
     fn chip_slot(self: &Rc<Self>, sources: &[usize], segs: &[Segment], audio: bool) -> gtk::Box {
         let slot = hbox(0, &["source-slot"]);
         slot.set_size_request(52, -1);
+        slot.set_hexpand(false);
         slot.set_halign(gtk::Align::End);
         slot.set_valign(gtk::Align::Start);
         if let Some(c) = self.source_chip(sources, segs, audio) {
             c.set_halign(gtk::Align::End);
-            c.set_hexpand(true);
             slot.append(&c);
         }
         slot

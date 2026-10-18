@@ -73,7 +73,7 @@ fn seeds() -> Vec<Seed> {
 
     let mut q4 = ready("Q4 roadmap with Lena", App::Zoom, Some("Q4 roadmap"), at(0, 10, 30), 42);
     q4.speaker_names = names(&[("c0s0", "Lena"), ("c0s1", "Marco"), ("c0s2", "Priya")]);
-    let q4_notes = EnhancedNotes {
+    let mut q4_notes = EnhancedNotes {
         sections: vec![NoteSection {
             title: "Decisions".into(),
             items: vec![
@@ -92,6 +92,13 @@ fn seeds() -> Vec<Seed> {
             action("Draft January pricing options", "Priya", false),
         ],
     };
+    // Sources: transcript line numbers behind each point.
+    for (item, src) in q4_notes.sections[0].items.iter_mut().zip([vec![1, 2], vec![3, 4], vec![6]]) {
+        item.sources = src;
+    }
+    for (a, src) in q4_notes.action_items.iter_mut().zip([vec![2], vec![5], vec![6]]) {
+        a.sources = src;
+    }
 
     let mut hiking = ready("Hiking crew · #planning", App::Discord, Some("Hiking crew · #planning"), at(0, 8, 15), 18);
     hiking.speaker_names = names(&[("c0s0", "Anja"), ("c0s1", "Reto")]);
@@ -215,6 +222,14 @@ fn main() -> anyhow::Result<()> {
             store::set_enhanced(&c, &s.meeting.id, Some(e))?;
         }
         store::replace_segments(&mut c, &s.meeting.id, &s.segments)?;
+        // A silent playback track, so the player shows up in demo screenshots.
+        if s.meeting.title.as_deref() == Some("Q4 roadmap with Lena") {
+            let secs = s.meeting.duration_ms().unwrap_or(60_000) as usize / 1000;
+            let mut w = muesli_audio::playback::PlaybackWriter::create(&muesli_core::paths::playback_dir(&s.meeting.id))?;
+            let second = vec![0.0f32; muesli_audio::playback::RATE as usize];
+            (0..secs).try_for_each(|_| w.write(&second))?;
+            w.finish()?;
+        }
         println!("{}  {}", s.meeting.id, s.meeting.display_title());
     }
     println!("seeded {}", db.display());

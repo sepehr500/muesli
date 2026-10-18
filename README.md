@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/notes-and-transcript.png" alt="muesli: enhanced notes and a speaker-labelled transcript for a meeting">
+  <img src="docs/screenshots/notes-and-transcript.png" alt="muesli: meeting notes with source timestamps, the transcript with cited lines highlighted, and the audio player">
 </p>
 
 Join a Zoom or Discord call and muesli quietly starts taking notes. Jot a few bullets if you
@@ -37,6 +37,8 @@ meeting, not a monthly fee.
    word for word.
 3. **Hang up.** Echo is removed, silence trimmed, speech transcribed, and your bullets are
    filled in with what was decided and who's doing what. Pick a suggested title and you're done.
+4. **Check anything.** Every point carries a timestamp. Click it to jump to that moment in the
+   transcript and hear it.
 
 ## Why muesli
 
@@ -61,7 +63,13 @@ meeting, not a monthly fee.
   channels, and WebRTC echo cancellation strips the call out of your mic afterwards
   (about −26 dB on a real call), so nobody is transcribed twice.
 - **Your notes, filled in.** Your own bullets are kept exactly as written; the AI adds context,
-  decisions and to-dos underneath, visibly marked as its additions.
+  decisions and to-dos underneath, visibly marked as its additions. One click on **Your notes**
+  takes you back to what you typed.
+- **Every point shows its source.** Each note and to-do links to the transcript lines it came
+  from. Click the timestamp to see them highlighted and hear the moment. Sources are checked
+  against the real transcript, so the AI can't cite lines that don't exist.
+- **Play it back.** Listen to any meeting with the echo already removed, scrub through it, or
+  click any line of the transcript to play from there. The transcript follows along.
 - **Name it when it's over.** Title suggestions from what was actually said, one click to accept.
 - **A transcript that knows who's talking.** "You" comes from your mic; other voices are
   separated by the transcription model and named when the conversation makes it clear.
