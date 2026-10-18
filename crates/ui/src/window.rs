@@ -722,7 +722,8 @@ impl Win {
 
     fn send(self: &Rc<Self>, req: Request, ok_toast: Option<&'static str>) {
         let w = self.clone();
-        dbg_log!("send {req:?}");
+        // Request kind only: payloads can contain meeting titles and names.
+        dbg_log!("send {}", format!("{req:?}").split([' ', '{', '(']).next().unwrap_or(""));
         glib::spawn_future_local(async move {
             let res = daemon::request(req).await;
             dbg_log!("send result ok={}", res.is_ok());

@@ -10,6 +10,14 @@ fn dirs() -> directories::ProjectDirs {
     directories::ProjectDirs::from("", "", "muesli").expect("no home directory")
 }
 
+/// Create `dir` (and parents) and make it private to the user (0700): config holds the API key,
+/// data holds recordings and transcripts.
+pub fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
 pub fn config_dir() -> PathBuf {
     home_override().map(|h| h.join("config")).unwrap_or_else(|| dirs().config_dir().to_path_buf())
 }

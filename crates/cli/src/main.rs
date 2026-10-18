@@ -69,7 +69,10 @@ enum Cmd {
     /// Open the notes app (optionally at a meeting).
     Open { id: Option<String> },
     /// Store the OpenRouter API key (~/.config/muesli/openrouter.key, mode 600).
-    SetKey { key: String },
+    SetKey {
+        /// Omit to be prompted (keeps the key out of shell history); `-` reads stdin.
+        key: Option<String>,
+    },
     /// Debug: what does detection see right now?
     Detect,
 }
@@ -126,7 +129,7 @@ fn human_status(s: &Status) -> String {
     });
     let naming = s.needs_name.iter().map(|n| format!("\n  Name this meeting: {} [{}]", n.title, n.meeting_id));
     let auto = if s.auto_record { "auto-record on" } else { "auto-record off" };
-    let key = if s.api_key { "" } else { "\n  ⚠ No OpenRouter key — run: muesli-cli set-key <key>" };
+    let key = if s.api_key { "" } else { "\n  ⚠ No OpenRouter key — run: muesli-cli set-key" };
     format!("{session} · {auto}{}{}{key}", processing.collect::<String>(), naming.collect::<String>())
 }
 
@@ -250,6 +253,12 @@ fn main() -> Result<()> {
             cmd.spawn()?;
         }
         Cmd::SetKey { key } => {
+            let key = match key.as_deref() {
+                Some("-") => std::io::read_to_string(std::io::stdin())?,
+                Some(k) => k.to_string(),
+                None => prompt_hidden("OpenRouter API key: ")?,
+            };
+            anyhow::ensure!(!key.trim().is_empty(), "no key given");
             config::save_api_key(&key)?;
             let _ = ipc::request(&Request::ReloadConfig);
             println!("saved to {}", muesli_core::paths::key_file().display());
@@ -266,4 +275,34 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Read a line from the terminal without echoing it. Fails closed: if echo can't be turned
+/// off, nothing is read. Piped stdin (not a terminal) is read as-is.
+fn prompt_hidden(prompt: &str) -> Result<String> {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return Ok(std::io::read_to_string(std::io::stdin())?);
+    }
+    let stty = |args: &[&str]| {
+        std::process::Command::new("stty").args(args).stdin(std::process::Stdio::inherit()).output().ok().filter(|o| o.status.success())
+    };
+    // Save the exact terminal state; restore it on every path, including errors and panics.
+    let saved = stty(&["-g"]).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty());
+    let saved = saved.ok_or_else(|| anyhow::anyhow!("can't read terminal state; use `muesli-cli set-key -` and pipe the key"))?;
+    struct Restore(String);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("stty").arg(&self.0).stdin(std::process::Stdio::inherit()).status();
+        }
+    }
+    let _restore = Restore(saved);
+    stty(&["-echo"]).ok_or_else(|| anyhow::anyhow!("can't hide input; use `muesli-cli set-key -` and pipe the key"))?;
+    eprint!("{prompt}");
+    std::io::stderr().flush()?;
+    let mut line = String::new();
+    let read = std::io::stdin().read_line(&mut line);
+    eprintln!();
+    read?;
+    Ok(line)
 }

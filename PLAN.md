@@ -8,7 +8,7 @@ Target system: Arch/Omarchy, Wayland (Hyprland), PipeWire, Quickshell-based `oma
 
 ## 0. Implementation notes (v0.1)
 
-- **Discord on this machine is the Chrome web app.** The mic stream belongs to Chrome's audio service (`application.process.binary=chrome`), whose parent owns a window with class `chrome-discord.com__…`. Detection therefore also accepts "browser has a live, uncorked mic stream **and** a Zoom/Discord window exists". The `pw-dump` + `hyprctl` fixtures live in `crates/core/tests/fixtures/`.
+- **Discord on this machine is the Chrome web app.** The mic stream belongs to Chrome's audio service (`application.process.binary=chrome`), whose parent owns a window with class `chrome-discord.com__…`. Detection therefore also accepts "browser has a live, uncorked mic stream **and** a Zoom/Discord window exists". Synthetic `pw-dump` + `hyprctl` fixtures modelled on that capture live in `crates/core/tests/fixtures/`.
 - **Echo, measured on a real call (speakers):** the mic picks up the speakers about 28 ms late, with correlation 0.42. After offline WebRTC AEC3 it drops to 0.04 (−26 dB), and false "you" speech falls from 17.3 s to 0 s in a 20 s clip.
 - **fish-audio/transcribe-1-pro:**
   - Accepts Ogg Opus.

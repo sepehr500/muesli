@@ -113,7 +113,7 @@ impl Config {
     pub fn save(&self) -> anyhow::Result<()> {
         let path = paths::config_file();
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
+            paths::ensure_private_dir(dir)?;
         }
         std::fs::write(path, toml::to_string_pretty(self)?)?;
         Ok(())
@@ -150,14 +150,21 @@ pub fn api_key() -> Option<String> {
         .filter(|k| !k.is_empty())
 }
 
+/// Write the key so it is never readable by others, even briefly: a fresh 0600 temp file in a
+/// 0700 directory, then an atomic rename over the old key (which also replaces a symlink rather
+/// than writing through it).
 pub fn save_api_key(key: &str) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     let path = paths::key_file();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(&path, key.trim())?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    let dir = path.parent().ok_or_else(|| anyhow::anyhow!("key path has no parent"))?;
+    paths::ensure_private_dir(dir)?;
+    let tmp = dir.join(format!(".openrouter.key.{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+    f.write_all(key.trim().as_bytes())?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, &path)?;
     Ok(())
 }
 

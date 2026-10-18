@@ -253,6 +253,8 @@ async fn main() -> Result<()> {
         notifier: notify::Notifier::new(actions_tx),
     });
 
+    paths::ensure_private_dir(&paths::config_dir())?;
+    paths::ensure_private_dir(&paths::data_dir())?;
     std::fs::create_dir_all(paths::meetings_dir())?;
     let server = tokio::spawn(server::serve(ctx.clone()));
     // Fail fast if another daemon owns the socket.

@@ -4,6 +4,8 @@ After=pipewire.service pipewire-pulse.service
 Wants=pipewire.service
 
 [Service]
+# Recordings, transcripts and the API key are private to the user.
+UMask=0077
 Type=simple
 ExecStart=%h/.local/bin/muesli-daemon
 Restart=on-failure

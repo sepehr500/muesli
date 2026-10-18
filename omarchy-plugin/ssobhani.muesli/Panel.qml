@@ -778,7 +778,7 @@ Panel {
           wrapMode: Text.Wrap
           color: root.muted
           font.pixelSize: Style.font.bodySmall
-          text: "No OpenRouter key — notes stay transcript-only. Run: muesli-cli set-key <key>"
+          text: "No OpenRouter key — notes stay transcript-only. Run: muesli-cli set-key"
         }
 
         Label {

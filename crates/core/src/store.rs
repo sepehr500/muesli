@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS chats (
 
 pub fn open(path: &Path) -> Result<Connection> {
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+        crate::paths::ensure_private_dir(dir)?;
     }
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;

@@ -25,7 +25,7 @@ impl Message {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
     base_url: String,
@@ -67,8 +67,33 @@ pub enum SttError {
     Fatal(String),
 }
 
+/// Never print the key.
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client").field("base_url", &self.base_url).field("key", &"<redacted>").field("zdr", &self.zdr).finish()
+    }
+}
+
+/// The key is a bearer token: only send it over HTTPS. Plain HTTP is allowed only when the
+/// parsed host is loopback (local proxies). Credentials embedded in the URL are refused.
+fn check_base_url(url: &str) -> Result<()> {
+    let u = reqwest::Url::parse(url).map_err(|e| anyhow!("invalid base_url {url}: {e}"))?;
+    anyhow::ensure!(u.username().is_empty() && u.password().is_none(), "base_url must not contain credentials");
+    let loopback = match u.host() {
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
+    match (u.scheme(), loopback) {
+        ("https", _) | ("http", true) => Ok(()),
+        _ => bail!("refusing to send the API key to {url}: use https (http only for localhost)"),
+    }
+}
+
 impl Client {
     pub fn new(cfg: &crate::config::OpenRouter, key: String) -> Result<Self> {
+        check_base_url(&cfg.base_url)?;
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(180))
             .connect_timeout(Duration::from_secs(15))
@@ -85,7 +110,7 @@ impl Client {
         self.http
             .post(format!("{}{path}", self.base_url))
             .bearer_auth(&self.key)
-            .header("HTTP-Referer", "https://github.com/muesli-notes")
+            .header("HTTP-Referer", "https://github.com/sepehr500/muesli")
             .header("X-Title", "Muesli")
     }
 
@@ -186,5 +211,28 @@ impl Client {
             }
         }
         bail!("all transcription models failed: {}", errors.join("; "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_only_over_https_and_never_printed() {
+        assert!(check_base_url("https://openrouter.ai/api/v1").is_ok());
+        assert!(check_base_url("http://localhost:8080/v1").is_ok());
+        assert!(check_base_url("http://127.0.0.1:9000").is_ok());
+        assert!(check_base_url("http://[::1]:9000").is_ok());
+        assert!(check_base_url("http://openrouter.ai/api/v1").is_err());
+        // Prefix tricks that resolve to a remote host.
+        assert!(check_base_url("http://localhost.attacker.example/api/v1").is_err());
+        assert!(check_base_url("http://localhost@attacker.example/api/v1").is_err());
+        assert!(check_base_url("http://127.0.0.1.attacker.example/api/v1").is_err());
+        assert!(check_base_url("https://user:pw@openrouter.ai/api/v1").is_err());
+        assert!(check_base_url("ftp://openrouter.ai").is_err());
+        let cfg = crate::config::OpenRouter::default();
+        let c = Client::new(&cfg, "test-key-not-real-secret".into()).unwrap();
+        assert!(!format!("{c:?}").contains("secret"));
     }
 }

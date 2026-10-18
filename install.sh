@@ -38,7 +38,7 @@ if [ "${1:-}" != "--no-start" ]; then
 fi
 
 if [ -z "${OPENROUTER_API_KEY:-}" ] && [ ! -f "$HOME/.config/muesli/openrouter.key" ]; then
-  echo "Set your OpenRouter key:  muesli-cli set-key sk-or-..."
+  echo "Set your OpenRouter key:  muesli-cli set-key"
 fi
 for _ in $(seq 30); do "$bin/muesli-cli" status >/dev/null 2>&1 && break; sleep 0.1; done
 echo "Installed. Status: $("$bin/muesli-cli" status 2>&1 | head -1)"

@@ -11,7 +11,7 @@ Built for Omarchy / Hyprland / PipeWire. Rust, GTK4 + libadwaita, an Omarchy bar
 
 ```bash
 ./install.sh                     # builds release binaries into ~/.local/bin, enables the user service
-muesli-cli set-key sk-or-v1-…    # or export OPENROUTER_API_KEY
+muesli-cli set-key               # prompts without echo; or export OPENROUTER_API_KEY
 ```
 
 Then add the bar widget: `{ "id": "ssobhani.muesli" }` in `bar.layout.right` of

@@ -1,4 +1,25 @@
+# Build output
 /target
-*.log
+
+# Secrets: never commit keys or local config
 *.key
 /config/
+.env
+.env.*
+!.env.example
+
+# Runtime data: recordings, databases, logs (MUESLI_HOME dev dirs)
+/data/
+/recordings/
+/logs/
+*.log
+*.opus
+*.ogg
+*.wav
+*.flac
+*.mp3
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sock

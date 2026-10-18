@@ -95,7 +95,7 @@ class Mock:
             elif name == "recording":
                 self.session = {
                     "kind": "recording", "meeting_id": self.new_id(), "app": "zoom",
-                    "hint": "Zoom Meeting · Lena Hofer", "started_at": now_ms() - (24 * 60 + 7) * 1000, "manual": False,
+                    "hint": "Zoom Meeting · Lena", "started_at": now_ms() - (24 * 60 + 7) * 1000, "manual": False,
                 }
             elif name == "processing":
                 self.session = {"kind": "idle"}
