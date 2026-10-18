@@ -38,6 +38,9 @@ pub enum Request {
     /// Re-run only note enhancement (e.g. after editing your own notes).
     Enhance { id: MeetingId },
     Delete { id: MeetingId },
+    /// Rename the person shown as `from` (e.g. "Speaker 2") everywhere in this meeting.
+    /// Giving two speakers the same name merges them; an empty `to` resets the name.
+    RenameSpeaker { id: MeetingId, from: String, to: String },
     /// The daemon reloads config.toml.
     ReloadConfig,
 }

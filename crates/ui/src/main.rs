@@ -62,7 +62,7 @@ fn load_css(win: &Win) {
 
 /// Dev aid: render the window offscreen to a PNG (used with the Broadway backend, so
 /// screenshots never involve the compositor).
-fn snapshot_png(window: &adw::ApplicationWindow, path: &str) -> Result<(), glib::Error> {
+fn snapshot_png(window: &impl IsA<gtk::Widget>, path: &str) -> Result<(), glib::Error> {
     let paintable = gtk::WidgetPaintable::new(Some(window));
     let (w, h) = (window.width() as f64, window.height() as f64);
     let snap = gtk::Snapshot::new();
@@ -76,7 +76,12 @@ fn snapshot_png(window: &adw::ApplicationWindow, path: &str) -> Result<(), glib:
 }
 
 fn main() -> glib::ExitCode {
-    let app = adw::Application::builder().application_id(APP_ID).flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE).build();
+    // Screenshot runs (dev aid) must not hand off to a running instance.
+    let flags = match std::env::var_os("MUESLI_UI_SHOT") {
+        Some(_) => gio::ApplicationFlags::HANDLES_COMMAND_LINE | gio::ApplicationFlags::NON_UNIQUE,
+        None => gio::ApplicationFlags::HANDLES_COMMAND_LINE,
+    };
+    let app = adw::Application::builder().application_id(APP_ID).flags(flags).build();
     let win: Rc<RefCell<Option<Rc<Win>>>> = Rc::default();
 
     app.connect_command_line(move |app, cmd| {
@@ -99,7 +104,12 @@ fn main() -> glib::ExitCode {
         if let Ok(path) = std::env::var("MUESLI_UI_SHOT") {
             let w = w.clone();
             glib::timeout_add_local_once(std::time::Duration::from_millis(1500), move || {
-                if let Err(e) = snapshot_png(&w.window, &path) {
+                let target = w.demo_target.borrow().clone();
+                let res = match target {
+                    Some(t) => snapshot_png(&t, &path),
+                    None => snapshot_png(&w.window, &path),
+                };
+                if let Err(e) = res {
                     eprintln!("screenshot failed: {e}");
                 }
                 if let Some(app) = w.window.application() {

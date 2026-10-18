@@ -136,7 +136,29 @@ pub fn parse_enhanced(s: &str) -> Option<(EnhancedNotes, BTreeMap<String, String
 /// Replace any raw speaker labels (`c0s1`, `[c0s1]`) that slipped into note text with the
 /// linked name, or the same "Speaker N" the transcript shows.
 pub fn scrub_labels(notes: EnhancedNotes, names: &BTreeMap<String, String>) -> EnhancedNotes {
-    let fix = |t: String| scrub_text(&t, names);
+    map_notes_text(notes, |t| scrub_text(&t, names))
+}
+
+/// Rename a person throughout the notes (whole-word: "Speaker 2" never matches "Speaker 21").
+pub fn rename_in_notes(notes: EnhancedNotes, from: &str, to: &str) -> EnhancedNotes {
+    map_notes_text(notes, |t| replace_whole(&t, from, to))
+}
+
+fn replace_whole(text: &str, from: &str, to: &str) -> String {
+    let word = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
+    match (from.is_empty(), text.find(from)) {
+        (true, _) | (_, None) => text.to_string(),
+        (false, Some(at)) => {
+            let end = at + from.len();
+            let bounded = !word(text[..at].chars().next_back()) && !word(text[end..].chars().next());
+            let head = if bounded { to } else { from };
+            format!("{}{head}{}", &text[..at], replace_whole(&text[end..], from, to))
+        }
+    }
+}
+
+fn map_notes_text(notes: EnhancedNotes, fix: impl Fn(String) -> String) -> EnhancedNotes {
+    let fix = &fix;
     EnhancedNotes {
         sections: notes
             .sections
@@ -244,6 +266,7 @@ mod tests {
         assert_eq!(scrub_text("c1s0 wakes up early", &names), "Speaker 1 wakes up early");
         assert_eq!(scrub_text("Ask [c1s2] about it.", &names), "Ask Barry about it.");
         assert_eq!(scrub_text("disc1s0 and c3po", &names), "disc1s0 and c3po");
+        assert_eq!(replace_whole("Speaker 2 and Speaker 21 met Speaker 2.", "Speaker 2", "Barry"), "Barry and Speaker 21 met Barry.");
         assert!(!is_real_name("a participant") && !is_real_name("Unknown speaker") && is_real_name("Barry"));
     }
 

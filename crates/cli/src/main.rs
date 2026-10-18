@@ -54,6 +54,9 @@ enum Cmd {
     Enhance { id: String },
     /// Delete a meeting and its audio.
     Delete { id: String },
+    /// Rename a speaker everywhere in a meeting, e.g. `rename-speaker ID "Speaker 2" Barry`.
+    /// Same name twice merges two speakers; an empty name resets to "Speaker N".
+    RenameSpeaker { id: String, from: String, to: String },
     /// List recent meetings (reads the database directly).
     List {
         #[arg(long, default_value_t = 20)]
@@ -205,6 +208,7 @@ fn main() -> Result<()> {
         Cmd::Reprocess { id } => drop(call(Request::Reprocess { id })?),
         Cmd::Enhance { id } => drop(call(Request::Enhance { id })?),
         Cmd::Delete { id } => drop(call(Request::Delete { id })?),
+        Cmd::RenameSpeaker { id, from, to } => drop(call(Request::RenameSpeaker { id, from, to })?),
         Cmd::List { limit, json } => {
             let c = store::open_default()?;
             let ms = store::list_meetings(&c, limit)?;

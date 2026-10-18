@@ -95,6 +95,8 @@ pub struct Win {
     thread_scroll: gtk::ScrolledWindow,
     // transcript
     drawer_body: gtk::Box,
+    /// Dev aid: widget to screenshot instead of the window (e.g. an open popover).
+    pub demo_target: RefCell<Option<gtk::Widget>>,
 }
 
 fn text_of(view: &gtk::TextView) -> String {
@@ -212,6 +214,7 @@ impl Win {
         copy_btn.set_valign(gtk::Align::Center);
         let menu = gio::Menu::new();
         menu.append(Some("Rename"), Some("win.rename"));
+        menu.append(Some("Copy transcript"), Some("win.copy-transcript"));
         menu.append(Some("Re-enhance notes"), Some("win.enhance"));
         menu.append(Some("Reprocess recording"), Some("win.reprocess"));
         let danger = gio::Menu::new();
@@ -370,11 +373,16 @@ impl Win {
         drawer_close.set_valign(gtk::Align::Center);
         let drawer_title = label("TRANSCRIPT", &["drawer-title"]);
         drawer_title.set_hexpand(true);
+        let drawer_copy = gtk::Button::new();
+        drawer_copy.set_child(Some(&IconView::new(&icons::COPY)));
+        drawer_copy.set_css_classes(&["flat-icon"]);
+        drawer_copy.set_valign(gtk::Align::Center);
+        drawer_copy.set_tooltip_text(Some("Copy transcript"));
         let drawer_body = vbox(18, &["drawer-body"]);
         let drawer = with(
             vbox(0, &["drawer"]),
             &[
-                with(hbox(0, &["drawer-head"]), &[drawer_title.upcast_ref(), drawer_close.upcast_ref()]).upcast_ref(),
+                with(hbox(0, &["drawer-head"]), &[drawer_title.upcast_ref(), drawer_copy.upcast_ref(), drawer_close.upcast_ref()]).upcast_ref(),
                 gtk::ScrolledWindow::builder()
                     .hscrollbar_policy(gtk::PolicyType::Never)
                     .vexpand(true)
@@ -438,6 +446,7 @@ impl Win {
             thread,
             thread_scroll,
             drawer_body,
+            demo_target: RefCell::default(),
         });
 
         // ---------------------------------------------------------------- wiring
@@ -449,6 +458,7 @@ impl Win {
             settings::show(&win.window, move || w.render_ask_model());
         }));
         copy_btn.connect_clicked(glib::clone!(#[strong] win, move |_| win.copy()));
+        drawer_copy.connect_clicked(glib::clone!(#[strong] win, move |_| win.copy_transcript()));
         save.connect_clicked(glib::clone!(#[strong] win, move |_| win.commit_title()));
         skip.connect_clicked(glib::clone!(#[strong] win, move |_| win.skip_naming()));
         win.enhance_btn.connect_clicked(glib::clone!(#[strong] win, move |_| win.enhance()));
@@ -575,6 +585,20 @@ impl Win {
         match what {
             "mine" => self.btn_mine.set_active(true),
             "transcript" => self.split.set_show_sidebar(true),
+            "rename" => {
+                self.split.set_show_sidebar(true);
+                let (body, w) = (self.drawer_body.clone(), self.clone());
+                glib::timeout_add_local_once(Duration::from_millis(400), move || {
+                    let first = std::iter::successors(body.first_child(), |w| w.next_sibling())
+                        .flat_map(|row| std::iter::successors(row.first_child(), |w| w.next_sibling()))
+                        .flat_map(|head| std::iter::successors(head.first_child(), |w| w.next_sibling()))
+                        .find_map(|w| w.downcast::<gtk::MenuButton>().ok());
+                    if let Some(b) = first {
+                        b.popup();
+                        *w.demo_target.borrow_mut() = b.popover().map(|p| p.upcast());
+                    }
+                });
+            }
             "settings" => {
                 let w = self.clone();
                 glib::timeout_add_local_once(Duration::from_millis(300), move || settings::show(&w.window, || {}));
@@ -602,6 +626,7 @@ impl Win {
             b.select_range(&b.start_iter(), &b.end_iter());
         });
         action("enhance", |w| w.enhance());
+        action("copy-transcript", |w| w.copy_transcript());
         action("reprocess", |w| w.simple_request(|id| Request::Reprocess { id }, "Reprocessing…"));
         action("delete", |w| w.confirm_delete());
     }
@@ -1051,7 +1076,7 @@ impl Win {
                 let text: gtk::Widget = match (it.from_user, &it.detail) {
                     (true, Some(d)) => with(vbox(2, &[]), &[para(&it.text, &["note-text"]).upcast_ref(), para(d, &["note-detail"]).upcast_ref()]).upcast(),
                     (true, None) => para(&it.text, &["note-text"]).upcast(),
-                    (false, Some(d)) => para(&format!("{} {}", it.text, d), &["note-ai"]).upcast(),
+                    (false, Some(d)) => para(&vm::join_sentences(&it.text, d), &["note-ai"]).upcast(),
                     (false, None) => para(&it.text, &["note-ai"]).upcast(),
                 };
                 if !it.from_user {
@@ -1109,7 +1134,7 @@ impl Win {
         }
     }
 
-    fn render_transcript(&self, segs: &[Segment], m: &Meeting) {
+    fn render_transcript(self: &Rc<Self>, segs: &[Segment], m: &Meeting) {
         clear(&self.drawer_body);
         let rows = vm::transcript_rows(segs, &m.speaker_names);
         if rows.is_empty() {
@@ -1122,15 +1147,73 @@ impl Win {
             return;
         }
         rows.iter().for_each(|r| {
-            let who = label(&r.speaker, &["speaker"]);
-            if r.me {
-                who.add_css_class("me");
-            }
-            let head = with(hbox(8, &[]), &[label(&r.time, &["ts"]).upcast_ref(), who.upcast_ref()]);
+            let who: gtk::Widget = match r.me {
+                true => label(&r.speaker, &["speaker", "me"]).upcast(),
+                false => self.speaker_button(&m.id, &r.speaker).upcast(),
+            };
+            let head = with(hbox(8, &[]), &[label(&r.time, &["ts"]).upcast_ref(), &who]);
             let text = para(&r.text, &["utterance"]);
             text.set_selectable(true);
             self.drawer_body.append(&with(vbox(4, &[]), &[head.upcast_ref(), text.upcast_ref()]));
         });
+    }
+
+    /// Speaker name that opens a rename popover. Renaming applies to every line from this
+    /// person; reusing another speaker's name merges the two.
+    fn speaker_button(self: &Rc<Self>, id: &str, speaker: &str) -> gtk::MenuButton {
+        let entry = gtk::Entry::new();
+        entry.set_text(speaker);
+        entry.set_width_chars(22);
+        entry.set_placeholder_text(Some("Name"));
+        let save = gtk::Button::with_label("Rename");
+        save.set_css_classes(&["primary", "small"]);
+        let hint = para(
+            &format!("Updates every line from {speaker}. Use another speaker's name to merge them."),
+            &["rename-hint"],
+        );
+        hint.set_max_width_chars(30);
+        let body = with(vbox(10, &["rename-pop"]), &[entry.upcast_ref(), hint.upcast_ref(), save.upcast_ref()]);
+        let pop = gtk::Popover::new();
+        pop.set_child(Some(&body));
+        pop.connect_show(glib::clone!(#[weak] entry, move |_| {
+            entry.grab_focus();
+            entry.select_region(0, -1);
+        }));
+        let btn = gtk::MenuButton::new();
+        btn.set_child(Some(&label(speaker, &[])));
+        btn.set_css_classes(&["speaker-btn"]);
+        btn.set_tooltip_text(Some("Rename speaker"));
+        btn.set_popover(Some(&pop));
+        let commit = {
+            let (w, id, from) = (self.clone(), id.to_string(), speaker.to_string());
+            glib::clone!(#[weak] entry, #[weak] pop, move || {
+                let to = entry.text().trim().to_string();
+                pop.popdown();
+                if to != from {
+                    w.send(Request::RenameSpeaker { id: id.clone(), from: from.clone(), to }, Some("Speaker renamed"));
+                }
+            })
+        };
+        let c2 = commit.clone();
+        entry.connect_activate(move |_| c2());
+        save.connect_clicked(move |_| commit());
+        btn
+    }
+
+    fn copy_transcript(&self) {
+        let st = self.st.borrow();
+        let Some(m) = st.current.as_ref() else { return };
+        let segs = store::segments(&self.db, &m.id).unwrap_or_default();
+        let rows = vm::transcript_rows(&segs, &m.speaker_names);
+        let msg = match rows.is_empty() {
+            true => "No transcript yet",
+            false => {
+                self.window.clipboard().set_text(&vm::transcript_text(&m.display_title(), &rows));
+                "Transcript copied"
+            }
+        };
+        drop(st);
+        self.toast(msg);
     }
 
     // ------------------------------------------------------------------ actions

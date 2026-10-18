@@ -319,6 +319,33 @@ pub fn display_speaker(s: &Speaker, names: &std::collections::BTreeMap<String, S
     }
 }
 
+/// Name map after renaming the person shown as `from` to `to`. One visible person can span
+/// several chunk-local labels, so every label currently displayed as `from` is renamed.
+/// An empty `to` resets them to "Speaker N". `None` if nobody is shown as `from`.
+pub fn rename_speaker(
+    segs: &[Segment],
+    names: &std::collections::BTreeMap<String, String>,
+    from: &str,
+    to: &str,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    let labels: std::collections::BTreeSet<String> = segs
+        .iter()
+        .filter_map(|s| match &s.speaker {
+            Speaker::Them(l) if display_speaker(&s.speaker, names) == from => Some(l.clone()),
+            _ => None,
+        })
+        .collect();
+    let to = to.trim();
+    (!labels.is_empty()).then(|| {
+        names
+            .iter()
+            .filter(|(k, _)| !labels.contains(*k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .chain(labels.iter().filter(|_| !to.is_empty()).map(|l| (l.clone(), to.to_string())))
+            .collect()
+    })
+}
+
 /// Distinct other speakers after name linking.
 pub fn other_speaker_count(segs: &[Segment], names: &std::collections::BTreeMap<String, String>) -> usize {
     let mut v: Vec<String> = segs
@@ -462,6 +489,30 @@ mod tests {
         let s = segments_from_stt("", &raw, &words, &map, false, 1);
         assert_eq!(s[0], seg(Speaker::Them("c1s0".into()), 100.0, 101.0, "hi there"));
         assert_eq!(s[1], seg(Speaker::Them("c1s1".into()), 103.0, 104.5, "hello you two"));
+    }
+
+    #[test]
+    fn rename_covers_every_label_shown_as_that_person() {
+        let segs = vec![
+            seg(Speaker::Them("c1s1".into()), 0.0, 1.0, "a"),
+            seg(Speaker::Them("c3s0".into()), 2.0, 3.0, "b"),
+            seg(Speaker::Them("c3s1".into()), 4.0, 5.0, "c"),
+            seg(Speaker::Me, 6.0, 7.0, "d"),
+        ];
+        let names: std::collections::BTreeMap<String, String> = [("c3s0".to_string(), "Lena".to_string())].into();
+        // c1s1 and c3s1 both show as "Speaker 2".
+        let n = rename_speaker(&segs, &names, "Speaker 2", " Barry ").unwrap();
+        assert_eq!(n.get("c1s1").map(String::as_str), Some("Barry"));
+        assert_eq!(n.get("c3s1").map(String::as_str), Some("Barry"));
+        assert_eq!(n.get("c3s0").map(String::as_str), Some("Lena"));
+        // Merge: naming Lena "Barry" too makes them one person.
+        let n = rename_speaker(&segs, &n, "Lena", "Barry").unwrap();
+        assert_eq!(other_speaker_count(&segs, &n), 1);
+        // Reset back to "Speaker N".
+        let n = rename_speaker(&segs, &n, "Barry", "").unwrap();
+        assert!(n.is_empty());
+        assert_eq!(rename_speaker(&segs, &n, "Nobody", "X"), None);
+        assert_eq!(rename_speaker(&segs, &n, "You", "X"), None);
     }
 
     #[test]

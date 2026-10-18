@@ -363,6 +363,21 @@ pub fn transcript_rows(segs: &[Segment], names: &BTreeMap<String, String>) -> Ve
     })
 }
 
+/// "Point" + "detail" as one paragraph, adding a full stop when the point has none.
+pub fn join_sentences(a: &str, b: &str) -> String {
+    let a = a.trim_end();
+    match a.ends_with(['.', '?', '!', ':', ';']) {
+        true => format!("{a} {}", b.trim()),
+        false => format!("{a}. {}", b.trim()),
+    }
+}
+
+/// Plain-text transcript for the clipboard: title, then "[00:05] Speaker 1: …" lines.
+pub fn transcript_text(title: &str, rows: &[TranscriptRow]) -> String {
+    let lines: Vec<String> = rows.iter().map(|r| format!("[{}] {}: {}", r.time, r.speaker, r.text)).collect();
+    format!("{title}\n\n{}\n", lines.join("\n"))
+}
+
 /// "elevenlabs/scribe-v2, assemblyai/universal-3-6-pro" ⇄ list.
 pub fn parse_list(s: &str) -> Vec<String> {
     s.split(',').map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect()
@@ -525,10 +540,13 @@ mod tests {
         assert_eq!(rows[0].text, "Hi. Ready?");
         assert_eq!((rows[1].time.as_str(), rows[1].speaker.as_str()), ("03:12", "Speaker 1"));
         assert_eq!(timestamp(3723.0), "1:02:03");
+        assert_eq!(transcript_text("Sync", &rows), "Sync\n\n[00:00] You: Hi. Ready?\n[03:12] Speaker 1: Yes\n");
     }
 
     #[test]
     fn misc() {
+        assert_eq!(join_sentences("Free Granola alternative", "Testing live."), "Free Granola alternative. Testing live.");
+        assert_eq!(join_sentences("Ship it?", "Yes."), "Ship it? Yes.");
         assert_eq!(parse_list(" a/b , ,c "), vec!["a/b", "c"]);
         assert_eq!(model_label("google/gemini-2.5-flash"), "Gemini 2.5 Flash");
         assert_eq!(model_label("anthropic/claude-sonnet-4.5"), "Claude Sonnet 4.5");

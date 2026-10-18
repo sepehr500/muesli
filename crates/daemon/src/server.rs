@@ -4,7 +4,7 @@ use crate::ctx::{Ctx, SessionCmd};
 use anyhow::Result;
 use muesli_core::ipc::{Event, Request, Response, SessionView};
 use muesli_core::model::{StepKind, StepStatus, fallback_title};
-use muesli_core::{config, paths, session, store};
+use muesli_core::{config, paths, prompts, session, store, transcript};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -121,6 +121,36 @@ async fn handle(ctx: &Arc<Ctx>, req: Request) -> Result<Response> {
         Request::Enhance { id } => {
             ctx.meeting(&id)?;
             tokio::spawn(crate::pipeline::run(ctx.clone(), id, true));
+            Ok(Response::empty())
+        }
+        Request::RenameSpeaker { id, from, to } => {
+            let to = to.trim();
+            anyhow::ensure!(!to.eq_ignore_ascii_case("you"), "\"You\" is reserved for your own microphone");
+            let mut m = ctx.meeting(&id)?;
+            let segs = ctx.db(|c| store::segments(c, &id))?;
+            let names = transcript::rename_speaker(&segs, &m.speaker_names, &from, to)
+                .ok_or_else(|| anyhow::anyhow!("nobody called \"{from}\" in this transcript"))?;
+            // Notes mention people by the name shown at the time; follow the rename there too.
+            let shown = |names: &std::collections::BTreeMap<String, String>| {
+                segs.iter()
+                    .find(|s| transcript::display_speaker(&s.speaker, &m.speaker_names) == from)
+                    .map(|s| transcript::display_speaker(&s.speaker, names))
+                    .unwrap_or_default()
+            };
+            let new_name = shown(&names);
+            let notes = ctx.db(|c| store::get_notes(c, &id))?;
+            if let Some(enh) = notes.enhanced {
+                let enh = prompts::rename_in_notes(enh, &from, &new_name);
+                ctx.db(|c| store::set_enhanced(c, &id, Some(&enh)))?;
+            }
+            m.speaker_names = names;
+            let others = transcript::other_speaker_count(&segs, &m.speaker_names);
+            if m.pipeline.status_of(StepKind::Transcribed) == StepStatus::Done {
+                let detail = format!("{} · cost ${:.2}", crate::pipeline::others_phrase(others), m.cost_usd);
+                m.pipeline = std::mem::take(&mut m.pipeline).with(StepKind::Transcribed, StepStatus::Done, Some(detail));
+            }
+            ctx.save(&m)?;
+            ctx.meeting_updated(&id);
             Ok(Response::empty())
         }
         Request::Delete { id } => {

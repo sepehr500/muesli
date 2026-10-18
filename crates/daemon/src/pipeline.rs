@@ -29,7 +29,7 @@ struct CleanManifest {
     echo_cancelled: bool,
 }
 
-fn others_phrase(n: usize) -> String {
+pub fn others_phrase(n: usize) -> String {
     match n {
         0 => "Just you".into(),
         1 => "You and 1 other".into(),
