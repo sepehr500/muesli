@@ -316,6 +316,18 @@ textview.user-notes { margin-top: 36px; font-size: 15px; line-height: 24px; }
 .ask text { font-size: 15px; background: none; color: var(--granite); caret-color: var(--gentian); }
 .ask text placeholder { color: var(--slate); }
 .ask .model { font-size: 12px; line-height: 16px; color: var(--slate); }
+menubutton.model-picker > button {
+  min-height: 0; padding: 4px 8px; border-radius: 6px;
+  background: none; box-shadow: none; border: none; color: var(--slate);
+}
+menubutton.model-picker > button:hover, menubutton.model-picker > button:checked { background: var(--hover); }
+.model-pop { padding: 8px 6px 6px 6px; min-width: 280px; }
+.model-pop .section-label { margin: 0 8px 2px 8px; }
+button.model-row { min-height: 0; padding: 7px 8px; border-radius: 7px; background: none; box-shadow: none; border: none; }
+button.model-row:hover { background: var(--hover); }
+button.model-row muesli-icon { color: var(--gentian); }
+.model-name { font-size: 14px; line-height: 18px; color: var(--granite); }
+.model-hint { font-size: 12px; line-height: 16px; color: var(--slate); }
 button.send {
   min-width: 36px; min-height: 36px; padding: 0;
   border-radius: 8px;

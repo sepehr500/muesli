@@ -24,7 +24,7 @@ fn override_value(i: u32) -> Option<bool> {
     }
 }
 
-fn reload_daemon() {
+pub fn reload_daemon() {
     glib::spawn_future_local(async {
         let _ = daemon::request(Request::ReloadConfig).await;
     });
@@ -127,7 +127,7 @@ pub fn show(parent: &impl IsA<gtk::Widget>, on_saved: impl Fn() + 'static) {
     let models = adw::PreferencesPage::builder().title("Models").icon_name("applications-science-symbolic").build();
     let mgroup = adw::PreferencesGroup::builder()
         .title("Models")
-        .description("Any OpenRouter model id, e.g. google/gemini-2.5-flash")
+        .description("Any OpenRouter model id, e.g. anthropic/claude-sonnet-5.5")
         .build();
     let entry = |title: &str, text: &str| {
         let r = adw::EntryRow::builder().title(title).text(text).build();

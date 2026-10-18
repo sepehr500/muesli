@@ -383,6 +383,24 @@ pub fn parse_list(s: &str) -> Vec<String> {
     s.split(',').map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect()
 }
 
+/// Models offered by the Ask bar's picker: (OpenRouter id, display name, short hint).
+/// Any other id can be typed.
+pub const ASK_MODELS: &[(&str, &str, &str)] = &[
+    ("anthropic/claude-sonnet-5.5", "Claude Sonnet 5.5", "Default"),
+    ("anthropic/claude-opus-5.5", "Claude Opus 5.5", "Most capable"),
+    ("anthropic/claude-haiku-5.5", "Claude Haiku 5.5", "Fast, cheap"),
+    ("openai/gpt-6.1-sol", "GPT-6.1 Sol", "OpenAI"),
+    ("google/gemini-4-argon", "Gemini 4 Argon", "Google"),
+    ("google/gemini-3.8-flash", "Gemini 3.8 Flash", "Fast"),
+    ("x-ai/grok-4.7", "Grok 4.7", "xAI"),
+    ("deepseek/deepseek-v4.1-flash", "DeepSeek V4.1 Flash", "Cheapest"),
+];
+
+/// Display name for a model: the curated name when listed, otherwise derived from the id.
+pub fn model_name(id: &str) -> String {
+    ASK_MODELS.iter().find(|(m, _, _)| *m == id).map(|(_, n, _)| n.to_string()).unwrap_or_else(|| model_label(id))
+}
+
 /// "google/gemini-2.5-flash" → "Gemini 2.5 Flash"; short acronyms ("gpt") upper-cased.
 pub fn model_label(model: &str) -> String {
     let word = |w: &str| -> String {
@@ -550,6 +568,10 @@ mod tests {
         assert_eq!(parse_list(" a/b , ,c "), vec!["a/b", "c"]);
         assert_eq!(model_label("google/gemini-2.5-flash"), "Gemini 2.5 Flash");
         assert_eq!(model_label("anthropic/claude-sonnet-4.5"), "Claude Sonnet 4.5");
+        assert_eq!(model_name("openai/gpt-6.1-sol"), "GPT-6.1 Sol");
+        assert_eq!(model_name("deepseek/deepseek-v4.1-flash"), "DeepSeek V4.1 Flash");
+        assert_eq!(model_name("google/gemini-2.5-flash"), "Gemini 2.5 Flash");
+        assert_eq!(ASK_MODELS[0].0, muesli_core::config::Config::default().openrouter.chat_model);
         assert_eq!(model_label("openai/gpt-4o"), "GPT 4o");
     }
 }

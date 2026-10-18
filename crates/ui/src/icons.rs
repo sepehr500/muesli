@@ -194,6 +194,7 @@ pub static ALERT: Icon = Icon {
     h: 16.0,
     parts: &[s(Circle(8.0, 8.0, 6.0), 1.4), s(Path("M8 4.8 V8.6"), 1.6), Part(Circle(8.0, 11.0, 0.9), Fill, C)],
 };
+pub static CHEVRON: Icon = Icon { w: 16.0, h: 16.0, parts: &[s(Path("M5 6.5 L8 9.5 L11 6.5"), 1.5)] };
 pub static CLOSE: Icon = Icon { w: 16.0, h: 16.0, parts: &[s(Path("M4.5 4.5 L11.5 11.5 M11.5 4.5 L4.5 11.5"), 1.5)] };
 
 const ROCK: Ink = Ink::Fixed(0xC9D5DEFF, 0x2F3A52FF);

@@ -151,8 +151,8 @@ The cost for an hour-long call with silence trimmed is roughly $0.20–0.40.
 [openrouter]
 base_url      = "https://openrouter.ai/api/v1"
 stt_models    = ["elevenlabs/scribe-v2", "assemblyai/universal-3-6-pro", "fish-audio/transcribe-1-pro"]
-chat_model    = "google/gemini-2.5-flash"      # titles, speaker linking, Q&A
-enhance_model = "anthropic/claude-sonnet-4.5"  # note enhancement
+chat_model    = "anthropic/claude-sonnet-5.5"      # titles, speaker linking, Q&A
+enhance_model = "anthropic/claude-sonnet-5.5"  # note enhancement
 zdr           = true                           # zero-data-retention routing only
 
 [recording]

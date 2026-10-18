@@ -73,8 +73,8 @@ impl Default for OpenRouter {
                 "assemblyai/universal-3-6-pro".into(),
                 "fish-audio/transcribe-1-pro".into(),
             ],
-            chat_model: "google/gemini-2.5-flash".into(),
-            enhance_model: "anthropic/claude-sonnet-4.5".into(),
+            chat_model: "anthropic/claude-sonnet-5.5".into(),
+            enhance_model: "anthropic/claude-sonnet-5.5".into(),
             zdr: false,
             language: None,
         }

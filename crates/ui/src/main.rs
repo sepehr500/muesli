@@ -77,7 +77,7 @@ fn snapshot_png(window: &impl IsA<gtk::Widget>, path: &str) -> Result<(), glib::
 
 fn main() -> glib::ExitCode {
     // Screenshot runs (dev aid) must not hand off to a running instance.
-    let flags = match std::env::var_os("MUESLI_UI_SHOT") {
+    let flags = match std::env::var_os("MUESLI_UI_SHOT").or_else(|| std::env::var_os("MUESLI_UI_DEBUG")) {
         Some(_) => gio::ApplicationFlags::HANDLES_COMMAND_LINE | gio::ApplicationFlags::NON_UNIQUE,
         None => gio::ApplicationFlags::HANDLES_COMMAND_LINE,
     };

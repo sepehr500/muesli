@@ -19,6 +19,18 @@ use std::time::Duration;
 
 const COLUMN: i32 = 688;
 
+fn dbg_on() -> bool {
+    std::env::var_os("MUESLI_UI_DEBUG").is_some()
+}
+
+macro_rules! dbg_log {
+    ($($t:tt)*) => {
+        if dbg_on() {
+            eprintln!("[dbg {}] {}", chrono::Local::now().format("%H:%M:%S%.3f"), format!($($t)*));
+        }
+    };
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Mine,
@@ -90,6 +102,7 @@ pub struct Win {
     ask_root: gtk::Widget,
     ask_entry: gtk::Text,
     ask_model: gtk::Label,
+    ask_models: gtk::Box,
     thread_rev: gtk::Revealer,
     thread: gtk::Box,
     thread_scroll: gtk::ScrolledWindow,
@@ -299,6 +312,22 @@ impl Win {
         ask_entry.set_hexpand(true);
         ask_entry.set_width_chars(1);
         let ask_model = label("", &["model"]);
+        let ask_models = vbox(2, &["model-list"]);
+        let ask_custom = gtk::Entry::new();
+        ask_custom.set_placeholder_text(Some("Other OpenRouter model id"));
+        ask_custom.set_width_chars(28);
+        let ask_pop = gtk::Popover::new();
+        ask_pop.set_position(gtk::PositionType::Top);
+        ask_pop.set_child(Some(&with(
+            vbox(8, &["model-pop"]),
+            &[label("MODEL FOR QUESTIONS AND TITLES", &["section-label"]).upcast_ref(), ask_models.upcast_ref(), ask_custom.upcast_ref()],
+        )));
+        let ask_model_btn = gtk::MenuButton::new();
+        ask_model_btn.set_child(Some(&with(hbox(4, &[]), &[ask_model.upcast_ref(), IconView::new(&icons::CHEVRON).upcast_ref()])));
+        ask_model_btn.set_css_classes(&["model-picker"]);
+        ask_model_btn.set_valign(gtk::Align::Center);
+        ask_model_btn.set_tooltip_text(Some("Choose model"));
+        ask_model_btn.set_popover(Some(&ask_pop));
         let send = gtk::Button::new();
         send.set_child(Some(&IconView::new(&icons::SEND)));
         send.set_css_classes(&["send"]);
@@ -306,7 +335,7 @@ impl Win {
         send.set_tooltip_text(Some("Ask"));
         let ask_bar = with(
             hbox(12, &["ask"]),
-            &[IconView::new(&icons::ASK).upcast_ref(), ask_entry.upcast_ref(), ask_model.upcast_ref(), send.upcast_ref()],
+            &[IconView::new(&icons::ASK).upcast_ref(), ask_entry.upcast_ref(), ask_model_btn.upcast_ref(), send.upcast_ref()],
         );
         let thread = vbox(0, &["thread-body"]);
         let thread_scroll = gtk::ScrolledWindow::builder()
@@ -442,6 +471,7 @@ impl Win {
             ask_root: ask_clamp.upcast(),
             ask_entry,
             ask_model,
+            ask_models,
             thread_rev,
             thread,
             thread_scroll,
@@ -459,6 +489,11 @@ impl Win {
         }));
         copy_btn.connect_clicked(glib::clone!(#[strong] win, move |_| win.copy()));
         drawer_copy.connect_clicked(glib::clone!(#[strong] win, move |_| win.copy_transcript()));
+        ask_custom.connect_activate(glib::clone!(#[strong] win, #[weak] ask_pop, move |e| {
+            ask_pop.popdown();
+            win.set_ask_model(&e.text());
+            e.set_text("");
+        }));
         save.connect_clicked(glib::clone!(#[strong] win, move |_| win.commit_title()));
         skip.connect_clicked(glib::clone!(#[strong] win, move |_| win.skip_naming()));
         win.enhance_btn.connect_clicked(glib::clone!(#[strong] win, move |_| win.enhance()));
@@ -561,6 +596,11 @@ impl Win {
             }
             glib::ControlFlow::Continue
         }));
+        if dbg_on() {
+            win.window.connect_focus_widget_notify(|w| {
+                dbg_log!("focus -> {}", GtkWindowExt::focus(w).map(|f| format!("{} {:?}", f.type_(), f.css_classes())).unwrap_or("none".into()));
+            });
+        }
         win.window.connect_close_request(glib::clone!(#[strong] win, move |_| {
             win.flush_notes();
             glib::Propagation::Proceed
@@ -594,6 +634,16 @@ impl Win {
                         .flat_map(|head| std::iter::successors(head.first_child(), |w| w.next_sibling()))
                         .find_map(|w| w.downcast::<gtk::MenuButton>().ok());
                     if let Some(b) = first {
+                        b.popup();
+                        *w.demo_target.borrow_mut() = b.popover().map(|p| p.upcast());
+                    }
+                });
+            }
+            "models" => {
+                let w = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(400), move || {
+                    let btn = w.ask_model.ancestor(gtk::MenuButton::static_type()).and_then(|b| b.downcast::<gtk::MenuButton>().ok());
+                    if let Some(b) = btn {
                         b.popup();
                         *w.demo_target.borrow_mut() = b.popover().map(|p| p.upcast());
                     }
@@ -642,6 +692,11 @@ impl Win {
     // ------------------------------------------------------------------ daemon events
 
     fn on_daemon(self: &Rc<Self>, msg: Msg) {
+        dbg_log!("daemon msg: {}", match &msg {
+            Msg::Status(_) => "status".to_string(),
+            Msg::MeetingUpdated(id) => format!("meeting updated {id}"),
+            Msg::Disconnected => "disconnected".to_string(),
+        });
         match msg {
             Msg::Status(s) => {
                 self.st.borrow_mut().status = Some(s);
@@ -667,8 +722,11 @@ impl Win {
 
     fn send(self: &Rc<Self>, req: Request, ok_toast: Option<&'static str>) {
         let w = self.clone();
+        dbg_log!("send {req:?}");
         glib::spawn_future_local(async move {
-            match daemon::request(req).await {
+            let res = daemon::request(req).await;
+            dbg_log!("send result ok={}", res.is_ok());
+            match res {
                 Ok(_) => {
                     if let Some(t) = ok_toast {
                         w.toast(t);
@@ -1135,6 +1193,7 @@ impl Win {
     }
 
     fn render_transcript(self: &Rc<Self>, segs: &[Segment], m: &Meeting) {
+        dbg_log!("render_transcript");
         clear(&self.drawer_body);
         let rows = vm::transcript_rows(segs, &m.speaker_names);
         if rows.is_empty() {
@@ -1184,6 +1243,21 @@ impl Win {
         btn.set_css_classes(&["speaker-btn"]);
         btn.set_tooltip_text(Some("Rename speaker"));
         btn.set_popover(Some(&pop));
+        if dbg_on() {
+            let who = speaker.to_string();
+            btn.connect_active_notify(move |b| dbg_log!("{who}: active={}", b.is_active()));
+            pop.connect_show(|_| dbg_log!("popover show"));
+            pop.connect_closed(|_| dbg_log!("popover closed"));
+            if let Some(inner) = btn.first_child() {
+                let click = gtk::GestureClick::new();
+                click.set_propagation_phase(gtk::PropagationPhase::Capture);
+                click.connect_pressed(|_, n, x, y| dbg_log!("press n={n} at {x:.0},{y:.0}"));
+                click.connect_released(|_, n, x, y| dbg_log!("release n={n} at {x:.0},{y:.0}"));
+                inner.add_controller(click);
+            }
+            entry.connect_activate(|_| dbg_log!("entry activate"));
+            save.connect_clicked(|_| dbg_log!("save clicked"));
+        }
         let commit = {
             let (w, id, from) = (self.clone(), id.to_string(), speaker.to_string());
             glib::clone!(#[weak] entry, #[weak] pop, move || {
@@ -1219,6 +1293,7 @@ impl Win {
     // ------------------------------------------------------------------ actions
 
     fn commit_title(self: &Rc<Self>) {
+        dbg_log!("commit_title");
         if self.st.borrow().loading {
             return;
         }
@@ -1352,8 +1427,48 @@ impl Win {
 
     // ------------------------------------------------------------------ ask
 
-    fn render_ask_model(&self) {
-        self.ask_model.set_text(&vm::model_label(&config::Config::load().openrouter.chat_model));
+    fn render_ask_model(self: &Rc<Self>) {
+        let current = config::Config::load().openrouter.chat_model;
+        self.ask_model.set_text(&vm::model_name(&current));
+        clear(&self.ask_models);
+        let listed = vm::ASK_MODELS.iter().any(|(id, _, _)| *id == current);
+        let custom_name = vm::model_name(&current);
+        let extra = (!listed).then_some((current.as_str(), custom_name.as_str(), "Custom"));
+        vm::ASK_MODELS.iter().copied().chain(extra).for_each(|(id, name, hint)| {
+            let check = IconView::new(&icons::CHECK);
+            check.set_opacity(if id == current { 1.0 } else { 0.0 });
+            let name = label(name, &["model-name"]);
+            name.set_hexpand(true);
+            let row = gtk::Button::new();
+            row.set_child(Some(&with(hbox(10, &[]), &[check.upcast_ref(), name.upcast_ref(), label(hint, &["model-hint"]).upcast_ref()])));
+            row.set_css_classes(&["model-row"]);
+            row.set_tooltip_text(Some(id));
+            let (w, id) = (self.clone(), id.to_string());
+            row.connect_clicked(move |b| {
+                if let Some(p) = b.ancestor(gtk::Popover::static_type()) {
+                    p.downcast::<gtk::Popover>().map(|p| p.popdown()).ok();
+                }
+                w.set_ask_model(&id);
+            });
+            self.ask_models.append(&row);
+        });
+    }
+
+    /// Persist the questions/titles model and tell the daemon (it names meetings with it).
+    fn set_ask_model(self: &Rc<Self>, id: &str) {
+        let id = id.trim();
+        let mut cfg = config::Config::load();
+        if id.is_empty() || cfg.openrouter.chat_model == id {
+            return;
+        }
+        cfg.openrouter.chat_model = id.to_string();
+        match cfg.save() {
+            Ok(()) => {
+                settings::reload_daemon();
+                self.render_ask_model();
+            }
+            Err(e) => self.toast(&format!("Couldn't save: {e}")),
+        }
     }
 
     fn render_thread(&self, id: &str) {
