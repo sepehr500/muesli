@@ -50,6 +50,11 @@ pub fn meeting_dir(id: &str) -> PathBuf {
     meetings_dir().join(id)
 }
 
+/// Mixed playback pieces for a meeting (see `muesli_audio::playback`).
+pub fn playback_dir(id: &str) -> PathBuf {
+    meeting_dir(id).join("playback")
+}
+
 pub fn socket_path() -> PathBuf {
     if let Some(h) = home_override() {
         return h.join("muesli.sock");

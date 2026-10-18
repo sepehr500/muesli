@@ -4,6 +4,7 @@
 use crate::capture::RecordingInfo;
 use crate::dsp::{Chunker, ChunkInfo, Vad};
 use crate::oggopus::decode_file;
+use crate::playback::{Leveler, PlaybackIndex, PlaybackWriter, load_index, mix_into};
 use anyhow::Result;
 use std::path::Path;
 
@@ -17,11 +18,13 @@ pub struct CleanOptions {
     pub max_chunk_speech_s: f64,
     /// Debug: also write the cleaned mic channel here (16 kHz Ogg Opus).
     pub dump_clean_mic: Option<std::path::PathBuf>,
+    /// Also write a mixed, level-matched playback copy (you + the call) here.
+    pub playback_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for CleanOptions {
     fn default() -> Self {
-        CleanOptions { echo_cancellation: true, max_chunk_speech_s: 240.0, dump_clean_mic: None }
+        CleanOptions { echo_cancellation: true, max_chunk_speech_s: 240.0, dump_clean_mic: None, playback_dir: None }
     }
 }
 
@@ -102,6 +105,9 @@ pub fn clean(raw_dir: &Path, out_dir: &Path, opts: &CleanOptions) -> Result<Clea
         Some(p) => Some(crate::oggopus::create_file(p, RATE, 32_000)?),
         None => None,
     };
+    let mut playback = opts.playback_dir.as_deref().map(PlaybackWriter::create).transpose()?;
+    let (mut lev_mic, mut lev_sys) = (Leveler::default(), Leveler::default());
+    let mut mixed = Vec::with_capacity(FRAME);
 
     for i in 0..n {
         let load = |names: &[String]| -> Vec<f32> {
@@ -124,6 +130,13 @@ pub fn clean(raw_dir: &Path, out_dir: &Path, opts: &CleanOptions) -> Result<Clea
                 d.write(m)?;
             }
             let (sm, ss) = (vad_mic.push(m), vad_sys.push(s));
+            if let Some(w) = playback.as_mut() {
+                let (mut a, mut b) = (*m, *s);
+                lev_mic.apply(&mut a, sm);
+                lev_sys.apply(&mut b, ss);
+                mix_into(&a, &b, &mut mixed);
+                w.write(&mixed)?;
+            }
             mic_ch.push(t, m, sm)?;
             sys_ch.push(t, s, ss)?;
             silent_frames += u64::from(!sm && !ss);
@@ -132,6 +145,9 @@ pub fn clean(raw_dir: &Path, out_dir: &Path, opts: &CleanOptions) -> Result<Clea
     }
     if let Some(d) = dump {
         d.finish()?;
+    }
+    if let Some(w) = playback {
+        w.finish()?;
     }
     let (mic_chunks, _) = mic_ch.finish()?;
     let (sys_chunks, _) = sys_ch.finish()?;
@@ -145,6 +161,17 @@ pub fn clean(raw_dir: &Path, out_dir: &Path, opts: &CleanOptions) -> Result<Clea
 }
 
 /// Normalized cross-correlation peak of `a` vs `b` within ±max_lag samples (echo metric).
+/// Build playback for a meeting recorded before playback existed: a full cleaning pass into a
+/// scratch directory (for the echo-cancelled mic), keeping only the playback copy.
+pub fn render_playback(raw_dir: &Path, playback_dir: &Path, echo_cancellation: bool) -> Result<PlaybackIndex> {
+    let scratch = playback_dir.with_extension("scratch");
+    let opts = CleanOptions { echo_cancellation, playback_dir: Some(playback_dir.to_path_buf()), ..Default::default() };
+    let r = clean(raw_dir, &scratch, &opts);
+    let _ = std::fs::remove_dir_all(&scratch);
+    r?;
+    load_index(playback_dir)
+}
+
 pub fn echo_correlation(a: &[f32], b: &[f32], max_lag: usize) -> f32 {
     let n = a.len().min(b.len());
     let energy = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>();

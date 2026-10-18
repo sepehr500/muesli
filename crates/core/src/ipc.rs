@@ -41,6 +41,9 @@ pub enum Request {
     /// Rename the person shown as `from` (e.g. "Speaker 2") everywhere in this meeting.
     /// Giving two speakers the same name merges them; an empty `to` resets the name.
     RenameSpeaker { id: MeetingId, from: String, to: String },
+    /// Make sure the meeting has a playback copy (built from the raw audio on first use) and
+    /// return its directory as `{"dir": "..."}`.
+    PreparePlayback { id: MeetingId },
     /// The daemon reloads config.toml.
     ReloadConfig,
 }

@@ -29,7 +29,7 @@ fn main() -> anyhow::Result<()> {
     for aec in [false, true] {
         let dump = dir.join(format!("clean-mic-aec{aec}.opus"));
         let r = clean::clean(&raw, &dir.join(format!("chunks-{aec}")), &clean::CleanOptions {
-            echo_cancellation: aec, max_chunk_speech_s: 240.0, dump_clean_mic: Some(dump.clone()),
+            echo_cancellation: aec, dump_clean_mic: Some(dump.clone()), ..Default::default()
         })?;
         let m = oggopus::decode_file(&dump, 16_000)?;
         let s = oggopus::decode_file(&raw.join("sys-000.opus"), 16_000)?;

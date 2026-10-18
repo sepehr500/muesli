@@ -169,10 +169,11 @@ fn writer(
     Ok((ch, names, written))
 }
 
-fn audio_format_pod() -> Vec<u8> {
+/// Mono F32LE format pod at `rate` (shared with the player).
+pub(crate) fn format_pod(rate: u32) -> Vec<u8> {
     let mut info = spa::param::audio::AudioInfoRaw::new();
     info.set_format(spa::param::audio::AudioFormat::F32LE);
-    info.set_rate(RATE);
+    info.set_rate(rate);
     info.set_channels(1);
     let obj = spa::pod::Object {
         type_: spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
@@ -228,7 +229,7 @@ fn run_pw(
                 }
             })
             .register()?;
-        let pod_bytes = audio_format_pod();
+        let pod_bytes = format_pod(RATE);
         let mut params = [spa::pod::Pod::from_bytes(&pod_bytes).ok_or_else(|| anyhow!("bad format pod"))?];
         stream.connect(
             spa::utils::Direction::Input,

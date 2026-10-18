@@ -12,7 +12,8 @@ use muesli_core::ipc::{Request, SessionView, Status};
 use muesli_core::model::{EnhancedNotes, Meeting, MeetingState, Notes, Segment};
 use muesli_core::openrouter::Message;
 use muesli_core::{config, prompts, store, transcript};
-use std::cell::RefCell;
+use muesli_audio::playback::Player;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Duration;
@@ -83,8 +84,8 @@ pub struct Win {
     pages: gtk::Stack,
     top_left: gtk::Box,
     top_right: gtk::Box,
+    /// "Your notes": edit what you typed (on) or read the finished notes (off).
     btn_mine: gtk::ToggleButton,
-    btn_enh: gtk::ToggleButton,
     enhance_btn: gtk::Button,
     column: gtk::Box,
     meta: gtk::Box,
@@ -110,6 +111,22 @@ pub struct Win {
     drawer_body: gtk::Box,
     /// Dev aid: widget to screenshot instead of the window (e.g. an open popover).
     pub demo_target: RefCell<Option<gtk::Widget>>,
+    // playback
+    drawer_scroll: gtk::ScrolledWindow,
+    player_bar: gtk::Box,
+    player_icon: IconView,
+    player_time: gtk::Label,
+    player_scale: gtk::Scale,
+    /// Player for the meeting it was opened for.
+    player: RefCell<Option<(String, Rc<Player>)>>,
+    /// Rendered transcript rows and their widgets (for seeking, highlighting, sources).
+    rows: RefCell<Vec<(vm::TranscriptRow, gtk::Box)>>,
+    playing_row: Cell<Option<usize>>,
+    ticking: Cell<bool>,
+    /// Row to keep in view while the drawer finishes laying out, and a generation counter
+    /// so an old request's expiry doesn't cancel a newer one.
+    scroll_target: Cell<Option<usize>>,
+    scroll_gen: Cell<u64>,
 }
 
 fn text_of(view: &gtk::TextView) -> String {
@@ -123,12 +140,6 @@ fn tview(classes: &[&str]) -> gtk::TextView {
     t.set_css_classes(classes);
     t.set_hexpand(true);
     t
-}
-
-fn toggle(text: &str) -> gtk::ToggleButton {
-    let b = gtk::ToggleButton::with_label(text);
-    b.set_valign(gtk::Align::Center);
-    b
 }
 
 impl Win {
@@ -206,10 +217,11 @@ impl Win {
         sidebar.set_hexpand(false);
 
         // ---------------------------------------------------------------- top bar
-        let btn_mine = toggle("My notes");
-        let btn_enh = toggle("Enhanced");
-        btn_enh.set_group(Some(&btn_mine));
-        let seg = with(hbox(2, &["segmented"]), &[btn_mine.upcast_ref(), btn_enh.upcast_ref()]);
+        let btn_mine = gtk::ToggleButton::new();
+        btn_mine.set_child(Some(&with(hbox(8, &[]), &[IconView::new(&icons::PENCIL).upcast_ref(), label("Your notes", &[]).upcast_ref()])));
+        btn_mine.set_css_classes(&["outline"]);
+        btn_mine.set_tooltip_text(Some("Edit the notes you typed"));
+        let seg = with(hbox(0, &[]), &[btn_mine.upcast_ref()]);
         seg.set_valign(gtk::Align::Center);
         let enhance_btn = icon_button(&icons::SPARKLE, Some("Enhance"), &["outline", "accent"]);
         enhance_btn.set_valign(gtk::Align::Center);
@@ -408,16 +420,31 @@ impl Win {
         drawer_copy.set_valign(gtk::Align::Center);
         drawer_copy.set_tooltip_text(Some("Copy transcript"));
         let drawer_body = vbox(18, &["drawer-body"]);
+        let drawer_scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vexpand(true)
+            .child(&drawer_body)
+            .build();
+        // Player: play/pause, scrubber, time.
+        let player_icon = IconView::new(&icons::PLAY);
+        let player_btn = gtk::Button::new();
+        player_btn.set_child(Some(&player_icon));
+        player_btn.set_css_classes(&["play"]);
+        player_btn.set_valign(gtk::Align::Center);
+        player_btn.set_tooltip_text(Some("Play recording"));
+        let player_scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 1.0, 0.1);
+        player_scale.set_draw_value(false);
+        player_scale.set_hexpand(true);
+        player_scale.set_valign(gtk::Align::Center);
+        player_scale.add_css_class("scrub");
+        let player_time = label("00:00 / 00:00", &["ts", "play-time"]);
+        let player_bar = with(hbox(10, &["player"]), &[player_btn.upcast_ref(), player_scale.upcast_ref(), player_time.upcast_ref()]);
         let drawer = with(
             vbox(0, &["drawer"]),
             &[
                 with(hbox(0, &["drawer-head"]), &[drawer_title.upcast_ref(), drawer_copy.upcast_ref(), drawer_close.upcast_ref()]).upcast_ref(),
-                gtk::ScrolledWindow::builder()
-                    .hscrollbar_policy(gtk::PolicyType::Never)
-                    .vexpand(true)
-                    .child(&drawer_body)
-                    .build()
-                    .upcast_ref(),
+                drawer_scroll.upcast_ref(),
+                player_bar.upcast_ref(),
             ],
         );
         let split = adw::OverlaySplitView::builder()
@@ -454,7 +481,6 @@ impl Win {
             top_left,
             top_right,
             btn_mine,
-            btn_enh,
             enhance_btn,
             column,
             meta,
@@ -477,6 +503,17 @@ impl Win {
             thread_scroll,
             drawer_body,
             demo_target: RefCell::default(),
+            drawer_scroll,
+            player_bar,
+            player_icon,
+            player_time,
+            player_scale,
+            player: RefCell::default(),
+            rows: RefCell::default(),
+            playing_row: Cell::new(None),
+            ticking: Cell::new(false),
+            scroll_target: Cell::new(None),
+            scroll_gen: Cell::new(0),
         });
 
         // ---------------------------------------------------------------- wiring
@@ -489,6 +526,25 @@ impl Win {
         }));
         copy_btn.connect_clicked(glib::clone!(#[strong] win, move |_| win.copy()));
         drawer_copy.connect_clicked(glib::clone!(#[strong] win, move |_| win.copy_transcript()));
+        // The user scrolling takes over from any pending automatic scroll.
+        let user_scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+        user_scroll.set_propagation_phase(gtk::PropagationPhase::Capture);
+        user_scroll.connect_scroll(glib::clone!(#[weak] win, #[upgrade_or] glib::Propagation::Proceed, move |_, _, _| {
+            win.scroll_target.set(None);
+            glib::Propagation::Proceed
+        }));
+        win.drawer_scroll.add_controller(user_scroll);
+        // Layout changes (drawer opening, text re-wrapping) move rows: re-apply a pending scroll.
+        win.drawer_scroll.vadjustment().connect_changed(glib::clone!(#[weak] win, move |_| {
+            if let Some(i) = win.scroll_target.get() {
+                win.apply_scroll(i);
+            }
+        }));
+        player_btn.connect_clicked(glib::clone!(#[strong] win, move |_| win.toggle_play()));
+        win.player_scale.connect_change_value(glib::clone!(#[strong] win, move |_, _, v| {
+            win.seek_to(v, false);
+            glib::Propagation::Proceed
+        }));
         ask_custom.connect_activate(glib::clone!(#[strong] win, #[weak] ask_pop, move |e| {
             ask_pop.popdown();
             win.set_ask_model(&e.text());
@@ -507,13 +563,11 @@ impl Win {
         }));
         win.ask_entry.add_controller(focus);
 
-        for (btn, mode) in [(&win.btn_mine, Mode::Mine), (&win.btn_enh, Mode::Enhanced)] {
-            btn.connect_toggled(glib::clone!(#[strong] win, move |b| {
-                if b.is_active() && !win.st.borrow().loading {
-                    win.set_mode(mode);
-                }
-            }));
-        }
+        win.btn_mine.connect_toggled(glib::clone!(#[strong] win, move |b| {
+            if !win.st.borrow().loading {
+                win.set_mode(if b.is_active() { Mode::Mine } else { Mode::Enhanced });
+            }
+        }));
 
         win.search.connect_changed(glib::clone!(#[strong] win, move |e| win.on_search(e.text().to_string())));
         let search_keys = gtk::EventControllerKey::new();
@@ -648,6 +702,37 @@ impl Win {
                         *w.demo_target.borrow_mut() = b.popover().map(|p| p.upcast());
                     }
                 });
+            }
+            "cite" => {
+                if std::env::var_os("MUESLI_UI_DEMO_OPEN").is_some() {
+                    self.split.set_show_sidebar(true);
+                }
+                let delay = std::env::var("MUESLI_UI_DEMO_CLICK_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
+                let (w, root) = (self.clone(), self.enhanced.clone());
+                glib::timeout_add_local_once(Duration::from_millis(delay), move || {
+                    fn find(w: &gtk::Widget) -> Option<gtk::Button> {
+                        if w.has_css_class("source") {
+                            return w.clone().downcast::<gtk::Button>().ok();
+                        }
+                        std::iter::successors(w.first_child(), |c| c.next_sibling()).find_map(|c| find(&c))
+                    }
+                    if let Some(b) = find(root.upcast_ref()) {
+                        b.emit_clicked();
+                    }
+                    let w2 = w.clone();
+                    glib::timeout_add_local_once(Duration::from_millis(900), move || w2.toggle_play());
+                });
+            }
+            "seek" => {
+                self.split.set_show_sidebar(true);
+                let w = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(300), move || w.seek_to(31.0, true));
+            }
+            "play" => {
+                let w = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(300), move || w.play_from(31.0));
+                let w = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(1400), move || w.toggle_play());
             }
             "settings" => {
                 let w = self.clone();
@@ -939,9 +1024,9 @@ impl Win {
                 st.awaiting_enhance = None;
             }
             let mode = match &st.mode {
+                _ if !has_enhanced => Mode::Mine,
                 Some((mid, mode)) if *mid == m.id && !awaited => *mode,
-                _ if has_enhanced => Mode::Enhanced,
-                _ => Mode::Mine,
+                _ => Mode::Enhanced,
             };
             st.mode = Some((m.id.clone(), mode));
             st.loading = true;
@@ -1003,9 +1088,9 @@ impl Win {
                 self.column.remove_css_class("wrapping");
                 clear(&self.enhanced);
                 match &notes.enhanced {
-                    Some(n) if has_enhanced => self.enhanced.append(&self.enhanced_widget(n)),
+                    Some(n) if has_enhanced => self.enhanced.append(&self.enhanced_widget(n, &segs, has_audio(&m))),
                     _ => self.enhanced.append(&para(
-                        "No enhanced notes yet. Write a few bullets in My notes, then press Enhance.",
+                        "No notes yet. Write a few bullets, then press Enhance.",
                         &["empty-notes"],
                     )),
                 }
@@ -1026,11 +1111,9 @@ impl Win {
 
         // Top bar.
         if let Some(seg) = self.btn_mine.parent() {
-            seg.set_visible(!wrapping);
+            seg.set_visible(!wrapping && has_enhanced);
         }
-        self.btn_enh.set_sensitive(has_enhanced);
         self.btn_mine.set_active(mode == Mode::Mine);
-        self.btn_enh.set_active(mode == Mode::Enhanced);
         let can_enhance = !wrapping && mode == Mode::Mine && m.state == MeetingState::Ready;
         self.enhance_btn.set_visible(can_enhance);
         set_button_text(&self.enhance_btn, if has_enhanced { "Re-enhance" } else { "Enhance" });
@@ -1124,7 +1207,57 @@ impl Win {
         root
     }
 
-    fn enhanced_widget(self: &Rc<Self>, n: &EnhancedNotes) -> gtk::Box {
+    /// Timestamp chip for a note's sources: opens the transcript at those lines (and plays
+    /// from the first, when the audio exists).
+    fn source_chip(self: &Rc<Self>, sources: &[usize], segs: &[Segment], audio: bool) -> Option<gtk::Button> {
+        let t = segs.get(*sources.first()?)?.t_start;
+        let chip = gtk::Button::with_label(&vm::timestamp(t));
+        chip.set_css_classes(&["source"]);
+        chip.set_valign(gtk::Align::Start);
+        let what = if audio { "Play the moment this came from" } else { "Show where this came from" };
+        chip.set_tooltip_text(Some(&match sources.len() {
+            1 => what.to_string(),
+            n => format!("{what} ({n} lines)"),
+        }));
+        let (w, sources) = (self.clone(), sources.to_vec());
+        chip.connect_clicked(move |_| w.cite(&sources, t, audio));
+        Some(chip)
+    }
+
+    /// Fixed-width column holding the source chip (empty when a point has no sources), so
+    /// chips and owners line up down the page.
+    fn chip_slot(self: &Rc<Self>, sources: &[usize], segs: &[Segment], audio: bool) -> gtk::Box {
+        let slot = hbox(0, &["source-slot"]);
+        slot.set_size_request(52, -1);
+        slot.set_halign(gtk::Align::End);
+        slot.set_valign(gtk::Align::Start);
+        if let Some(c) = self.source_chip(sources, segs, audio) {
+            c.set_halign(gtk::Align::End);
+            c.set_hexpand(true);
+            slot.append(&c);
+        }
+        slot
+    }
+
+    fn cite(self: &Rc<Self>, sources: &[usize], t: f64, audio: bool) {
+        self.split.set_show_sidebar(true);
+        let rows: Vec<usize> = {
+            let rows: Vec<vm::TranscriptRow> = self.rows.borrow().iter().map(|(r, _)| r.clone()).collect();
+            let mut v: Vec<usize> = sources.iter().filter_map(|&l| vm::row_of_line(&rows, l)).collect();
+            v.dedup();
+            v
+        };
+        dbg_log!("cite lines {sources:?} -> rows {rows:?}");
+        self.mark_row(Some(rows.clone()), "cited");
+        if let Some(&first) = rows.first() {
+            self.scroll_to_row(first);
+        }
+        if audio {
+            self.play_from(t);
+        }
+    }
+
+    fn enhanced_widget(self: &Rc<Self>, n: &EnhancedNotes, segs: &[Segment], audio: bool) -> gtk::Box {
         let root = vbox(0, &[]);
         n.sections.iter().for_each(|s| {
             let sec = vbox(14, &["note-section"]);
@@ -1142,7 +1275,8 @@ impl Win {
                     dash.add_css_class("ai");
                 }
                 text.set_hexpand(true);
-                sec.append(&with(hbox(12, &[]), &[dash.upcast_ref(), text.upcast_ref()]));
+                let slot = self.chip_slot(&it.sources, segs, audio);
+                sec.append(&with(hbox(12, &[]), &[dash.upcast_ref(), text.upcast_ref(), slot.upcast_ref()]));
             });
             root.append(&sec);
         });
@@ -1176,7 +1310,8 @@ impl Win {
                     }
                     w.set_action_done(i, c.is_active());
                 }));
-                sec.append(&with(hbox(12, &[]), &[check.upcast_ref(), text.upcast_ref(), owner.upcast_ref()]));
+                let slot = self.chip_slot(&a.sources, segs, audio);
+                sec.append(&with(hbox(12, &[]), &[check.upcast_ref(), text.upcast_ref(), owner.upcast_ref(), slot.upcast_ref()]));
             });
             root.append(&sec);
         }
@@ -1195,7 +1330,14 @@ impl Win {
 
     fn render_transcript(self: &Rc<Self>, segs: &[Segment], m: &Meeting) {
         dbg_log!("render_transcript");
+        // A player belongs to one meeting.
+        if self.player.borrow().as_ref().is_some_and(|(id, _)| *id != m.id) {
+            self.stop_player();
+        }
+        self.player_bar.set_visible(has_audio(m));
         clear(&self.drawer_body);
+        self.rows.borrow_mut().clear();
+        self.playing_row.set(None);
         let rows = vm::transcript_rows(segs, &m.speaker_names);
         if rows.is_empty() {
             let text = match m.state {
@@ -1211,11 +1353,24 @@ impl Win {
                 true => label(&r.speaker, &["speaker", "me"]).upcast(),
                 false => self.speaker_button(&m.id, &r.speaker).upcast(),
             };
-            let head = with(hbox(8, &[]), &[label(&r.time, &["ts"]).upcast_ref(), &who]);
+            let ts = gtk::Button::with_label(&r.time);
+            ts.set_css_classes(&["ts-btn"]);
+            ts.set_tooltip_text(Some("Play from here"));
+            ts.set_visible(has_audio(m));
+            let start = r.start;
+            ts.connect_clicked(glib::clone!(#[strong(rename_to = w)] self, move |_| w.play_from(start)));
+            let ts_label = label(&r.time, &["ts"]);
+            ts_label.set_visible(!has_audio(m));
+            let head = with(hbox(8, &[]), &[ts.upcast_ref(), ts_label.upcast_ref(), &who]);
             let text = para(&r.text, &["utterance"]);
             text.set_selectable(true);
-            self.drawer_body.append(&with(vbox(4, &[]), &[head.upcast_ref(), text.upcast_ref()]));
+            let row = with(vbox(4, &["t-row"]), &[head.upcast_ref(), text.upcast_ref()]);
+            self.drawer_body.append(&row);
+            self.rows.borrow_mut().push((r.clone(), row));
         });
+        if let Some(p) = self.current_player() {
+            self.highlight_playing(p.position());
+        }
     }
 
     /// Speaker name that opens a rename popover. Renaming applies to every line from this
@@ -1273,6 +1428,172 @@ impl Win {
         entry.connect_activate(move |_| c2());
         save.connect_clicked(move |_| commit());
         btn
+    }
+
+    // ------------------------------------------------------------------ playback
+
+    fn current_player(&self) -> Option<Rc<Player>> {
+        self.player.borrow().as_ref().map(|(_, p)| p.clone())
+    }
+
+    fn stop_player(&self) {
+        drop(self.player.take());
+        self.player_icon.set_icon(&icons::PLAY);
+        self.player_time.set_text("00:00 / 00:00");
+        self.player_scale.set_range(0.0, 1.0);
+        self.player_scale.set_value(0.0);
+        self.mark_row(None, "playing");
+    }
+
+    /// Run `then` with a player for the current meeting, building its playback copy first if
+    /// needed (the daemon does that from the raw recording; a few seconds per hour).
+    fn with_player(self: &Rc<Self>, then: impl FnOnce(&Rc<Self>, &Rc<Player>) + 'static) {
+        let Some(id) = self.st.borrow().current.as_ref().map(|m| m.id.clone()) else { return };
+        if let Some(p) = self.current_player() {
+            return then(self, &p);
+        }
+        self.player_time.set_text("Preparing audio…");
+        let w = self.clone();
+        glib::spawn_future_local(async move {
+            let opened = daemon::request(Request::PreparePlayback { id: id.clone() })
+                .await
+                .and_then(|v| v["dir"].as_str().map(std::path::PathBuf::from).ok_or_else(|| "no playback".to_string()))
+                .and_then(|dir| Player::open(&dir).map_err(|e| e.to_string()));
+            // The user may have moved to another meeting meanwhile.
+            if w.st.borrow().current.as_ref().map(|m| &m.id) != Some(&id) {
+                return;
+            }
+            match opened {
+                Ok(p) => {
+                    let p = Rc::new(p);
+                    w.player_scale.set_range(0.0, p.duration_s.max(0.1));
+                    w.player_time.set_text(&vm::play_time(0.0, p.duration_s));
+                    *w.player.borrow_mut() = Some((id, p.clone()));
+                    then(&w, &p);
+                }
+                Err(e) => {
+                    w.player_time.set_text("00:00 / 00:00");
+                    w.toast(&format!("Can't play this meeting: {e}"));
+                }
+            }
+        });
+    }
+
+    fn toggle_play(self: &Rc<Self>) {
+        self.with_player(|w, p| match p.is_playing() {
+            true => {
+                p.pause();
+                w.player_icon.set_icon(&icons::PLAY);
+            }
+            false => {
+                p.play();
+                w.start_ticking();
+            }
+        });
+    }
+
+    /// Open the transcript and play from meeting time `t`.
+    fn play_from(self: &Rc<Self>, t: f64) {
+        self.split.set_show_sidebar(true);
+        self.with_player(move |w, p| {
+            p.seek(t);
+            p.play();
+            w.player_scale.set_value(t);
+            w.highlight_playing(t);
+            w.start_ticking();
+        });
+    }
+
+    fn seek_to(self: &Rc<Self>, t: f64, _from_code: bool) {
+        self.with_player(move |w, p| {
+            p.seek(t);
+            w.player_scale.set_value(t);
+            w.player_time.set_text(&vm::play_time(t, p.duration_s));
+            w.highlight_playing(t);
+        });
+    }
+
+    fn start_ticking(self: &Rc<Self>) {
+        self.player_icon.set_icon(&icons::PAUSE);
+        if self.ticking.replace(true) {
+            return;
+        }
+        let w = self.clone();
+        glib::timeout_add_local(Duration::from_millis(120), move || {
+            let Some(p) = w.current_player() else {
+                w.ticking.set(false);
+                return glib::ControlFlow::Break;
+            };
+            let t = p.position();
+            w.player_scale.set_value(t);
+            w.player_time.set_text(&vm::play_time(t, p.duration_s));
+            w.highlight_playing(t);
+            match p.is_playing() {
+                true => glib::ControlFlow::Continue,
+                false => {
+                    w.player_icon.set_icon(&icons::PLAY);
+                    w.ticking.set(false);
+                    glib::ControlFlow::Break
+                }
+            }
+        });
+    }
+
+    /// Mark the row being played and keep it in view.
+    fn highlight_playing(self: &Rc<Self>, t: f64) {
+        let i = vm::row_at(&self.rows.borrow().iter().map(|(r, _)| r.clone()).collect::<Vec<_>>(), t);
+        if i != self.playing_row.get() {
+            self.playing_row.set(i);
+            self.mark_row(i.map(|i| vec![i]), "playing");
+            if let Some(i) = i {
+                self.scroll_to_row(i);
+            }
+        }
+    }
+
+    /// Put `class` on exactly the given rows.
+    fn mark_row(&self, rows: Option<Vec<usize>>, class: &str) {
+        let keep = rows.unwrap_or_default();
+        self.rows.borrow().iter().enumerate().for_each(|(i, (_, w))| match keep.contains(&i) {
+            true => w.add_css_class(class),
+            false => w.remove_css_class(class),
+        });
+    }
+
+    /// Bring row `i` into view, and keep it there for a moment: a drawer that was just opened
+    /// is still laying out, which moves rows after the first scroll.
+    fn scroll_to_row(self: &Rc<Self>, i: usize) {
+        let visible = self.row_box(i).is_some_and(|(y, h)| {
+            let adj = self.drawer_scroll.vadjustment();
+            y >= adj.value() && y + h <= adj.value() + adj.page_size()
+        });
+        if visible && self.scroll_target.get().is_none() {
+            return;
+        }
+        let g = self.scroll_gen.get() + 1;
+        self.scroll_gen.set(g);
+        self.scroll_target.set(Some(i));
+        self.apply_scroll(i);
+        let w = self.clone();
+        glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+            if w.scroll_gen.get() == g {
+                w.scroll_target.set(None);
+            }
+        });
+    }
+
+    /// Row `i`'s top and height inside the transcript, once laid out.
+    fn row_box(&self, i: usize) -> Option<(f64, f64)> {
+        let rows = self.rows.borrow();
+        let (_, w) = rows.get(i)?;
+        let p = w.compute_point(&self.drawer_body, &gtk::graphene::Point::new(0.0, 0.0))?;
+        (w.height() > 0).then(|| (p.y() as f64, w.height() as f64))
+    }
+
+    fn apply_scroll(&self, i: usize) {
+        if let Some((y, _)) = self.row_box(i) {
+            self.drawer_scroll.vadjustment().set_value((y - 24.0).max(0.0));
+        }
     }
 
     fn copy_transcript(&self) {
@@ -1555,3 +1876,9 @@ fn set_button_text(b: &gtk::Button, text: &str) {
     }
 }
 
+
+/// Can this meeting be played back? (Not while recording, and only while its audio exists.)
+fn has_audio(m: &Meeting) -> bool {
+    let dir = muesli_core::paths::meeting_dir(&m.id);
+    m.state != MeetingState::Recording && (dir.join("raw").is_dir() || dir.join("playback").join("index.json").exists())
+}

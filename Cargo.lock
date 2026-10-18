@@ -1482,6 +1482,7 @@ dependencies = [
  "chrono",
  "gtk4",
  "libadwaita",
+ "muesli-audio",
  "muesli-core",
  "rusqlite",
  "serde_json",

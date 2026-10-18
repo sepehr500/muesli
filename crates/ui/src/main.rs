@@ -103,7 +103,8 @@ fn main() -> glib::ExitCode {
         w.settle_focus();
         if let Ok(path) = std::env::var("MUESLI_UI_SHOT") {
             let w = w.clone();
-            glib::timeout_add_local_once(std::time::Duration::from_millis(1500), move || {
+            let delay = std::env::var("MUESLI_UI_SHOT_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1500);
+            glib::timeout_add_local_once(std::time::Duration::from_millis(delay), move || {
                 let target = w.demo_target.borrow().clone();
                 let res = match target {
                     Some(t) => snapshot_png(&t, &path),

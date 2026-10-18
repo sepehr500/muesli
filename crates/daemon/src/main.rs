@@ -226,6 +226,7 @@ fn prune_audio(ctx: &Ctx) {
             let dir = paths::meeting_dir(&m.id);
             let _ = std::fs::remove_dir_all(dir.join("raw"));
             let _ = std::fs::remove_dir_all(dir.join("clean"));
+            let _ = std::fs::remove_dir_all(dir.join("playback"));
         });
 }
 

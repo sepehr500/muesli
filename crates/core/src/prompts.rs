@@ -94,9 +94,12 @@ pub fn enhance_messages(
              - Never write the bracketed labels (like c0s1) in notes or owners. Use a person's real name when \
                the transcript makes it clear, otherwise a neutral phrase such as \"a participant\".\n\
              {template}{labels}\n\
+             - Transcript lines are numbered (#12). For every item and action item, list in \"sources\" the \
+               1-3 line numbers that most directly support it. Use [] only for a user point the transcript \
+               never mentions.\n\
              Reply with JSON only, exactly this shape:\n\
-             {{\"sections\":[{{\"title\":\"Decisions\",\"items\":[{{\"text\":\"...\",\"from_user\":true,\"detail\":\"...\"}}]}}],\
-             \"action_items\":[{{\"text\":\"...\",\"owner\":\"You\",\"from_user\":false}}],\
+             {{\"sections\":[{{\"title\":\"Decisions\",\"items\":[{{\"text\":\"...\",\"from_user\":true,\"detail\":\"...\",\"sources\":[12,14]}}]}}],\
+             \"action_items\":[{{\"text\":\"...\",\"owner\":\"You\",\"from_user\":false,\"sources\":[20]}}],\
              \"speakers\":{{\"c0s1\":\"Lena\"}}}}"
         )),
         Message::user(format!(
@@ -131,6 +134,33 @@ pub fn parse_enhanced(s: &str) -> Option<(EnhancedNotes, BTreeMap<String, String
         .filter(|(_, v)| is_real_name(v))
         .collect();
     Some((r.notes, speakers))
+}
+
+/// Keep only real transcript lines as sources (models sometimes cite lines that don't exist),
+/// sorted, deduplicated, at most 4 per point.
+pub fn validate_sources(notes: EnhancedNotes, n_lines: usize) -> EnhancedNotes {
+    let fix = |v: Vec<usize>| -> Vec<usize> {
+        let mut v: Vec<usize> = v.into_iter().filter(|&i| i < n_lines).collect();
+        v.sort_unstable();
+        v.dedup();
+        v.truncate(4);
+        v
+    };
+    EnhancedNotes {
+        sections: notes
+            .sections
+            .into_iter()
+            .map(|s| crate::model::NoteSection {
+                items: s.items.into_iter().map(|i| crate::model::NoteItem { sources: fix(i.sources), ..i }).collect(),
+                ..s
+            })
+            .collect(),
+        action_items: notes
+            .action_items
+            .into_iter()
+            .map(|a| crate::model::ActionItem { sources: fix(a.sources), ..a })
+            .collect(),
+    }
 }
 
 /// Replace any raw speaker labels (`c0s1`, `[c0s1]`) that slipped into note text with the
@@ -258,6 +288,17 @@ mod tests {
         assert_eq!(n.action_items[0].owner.as_deref(), Some("You"));
         assert_eq!(s.len(), 1);
         assert_eq!(s["c0s1"], "Lena");
+        assert!(n.sections[0].items[0].sources.is_empty(), "sources are optional");
+    }
+
+    #[test]
+    fn sources_parsed_and_validated() {
+        let r = r#"{"sections":[{"title":"D","items":[{"text":"Ship","sources":[14,2,2,99]}]}],
+                    "action_items":[{"text":"Spec","owner":"You","sources":[3,4,5,6,7,8]}]}"#;
+        let (n, _) = parse_enhanced(r).unwrap();
+        let n = validate_sources(n, 20);
+        assert_eq!(n.sections[0].items[0].sources, vec![2, 14]);
+        assert_eq!(n.action_items[0].sources, vec![3, 4, 5, 6]);
     }
 
     #[test]

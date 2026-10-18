@@ -153,6 +153,19 @@ async fn handle(ctx: &Arc<Ctx>, req: Request) -> Result<Response> {
             ctx.meeting_updated(&id);
             Ok(Response::empty())
         }
+        Request::PreparePlayback { id } => {
+            ctx.meeting(&id)?;
+            let dir = paths::playback_dir(&id);
+            if muesli_audio::playback::load_index(&dir).is_err() {
+                let raw = paths::meeting_dir(&id).join("raw");
+                anyhow::ensure!(raw.is_dir(), "the audio for this meeting was deleted");
+                let aec = ctx.cfg().recording.echo_cancellation;
+                let d = dir.clone();
+                tokio::task::spawn_blocking(move || muesli_audio::clean::render_playback(&raw, &d, aec)).await??;
+                tracing::info!("built playback for {id}");
+            }
+            Ok(Response::ok(serde_json::json!({ "dir": dir })))
+        }
         Request::Delete { id } => {
             let recording = matches!(&*ctx.session_view.read().expect("view"),
                 SessionView::Recording { meeting_id, .. } if *meeting_id == id);

@@ -120,7 +120,11 @@ async fn steps(ctx: &Arc<Ctx>, id: &str, enhance_only: bool) -> Result<()> {
     if m.pipeline.status_of(StepKind::Cleaned) != StepStatus::Done || !manifest_path.exists() {
         set_step(ctx, &mut m, StepKind::Cleaned, StepStatus::Active, None).await?;
         let (raw2, clean2) = (raw.clone(), clean_dir.clone());
-        let opts = CleanOptions { echo_cancellation: cfg.recording.echo_cancellation, ..Default::default() };
+        let opts = CleanOptions {
+            echo_cancellation: cfg.recording.echo_cancellation,
+            playback_dir: Some(paths::playback_dir(id)),
+            ..Default::default()
+        };
         let r = tokio::task::spawn_blocking(move || {
             let _ = std::fs::remove_dir_all(&clean2);
             clean(&raw2, &clean2, &opts)
@@ -204,12 +208,12 @@ async fn steps(ctx: &Arc<Ctx>, id: &str, enhance_only: bool) -> Result<()> {
             labels.sort();
             labels.dedup();
             let template = load_template();
-            let msgs = prompts::enhance_messages(&transcript::render_for_prompt(&segs), &notes.user_md, &template, &labels);
+            let msgs = prompts::enhance_messages(&transcript::render_numbered(&segs), &notes.user_md, &template, &labels);
             let r = client.chat(&cfg.openrouter.enhance_model, &msgs, true).await?;
             m.cost_usd += r.cost;
             let (enhanced, speakers) = prompts::parse_enhanced(&r.content)
                 .ok_or_else(|| anyhow!("the notes model returned something unreadable"))?;
-            let enhanced = prompts::scrub_labels(enhanced, &speakers);
+            let enhanced = prompts::validate_sources(prompts::scrub_labels(enhanced, &speakers), segs.len());
             ctx.db(|c| store::set_enhanced(c, id, Some(&enhanced)))?;
             m.speaker_names = speakers;
             // Refresh the transcript detail with linked names.

@@ -358,6 +358,23 @@ pub fn other_speaker_count(segs: &[Segment], names: &std::collections::BTreeMap<
     v.len()
 }
 
+/// Transcript with line numbers for citing: "#12 [03:12] You: ...". Line numbers are segment
+/// indices, so cited sources map straight back to transcript lines.
+pub fn render_numbered(segs: &[Segment]) -> String {
+    segs.iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let t = s.t_start.max(0.0) as u64;
+            let who = match &s.speaker {
+                Speaker::Me => "You".to_string(),
+                Speaker::Them(l) => format!("[{l}]"),
+            };
+            format!("#{i} [{:02}:{:02}] {who}: {}", t / 60, t % 60, s.text)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Plain-text transcript for prompts: "[03:12] You: ..." (raw labels for Them).
 pub fn render_for_prompt(segs: &[Segment]) -> String {
     segs.iter()

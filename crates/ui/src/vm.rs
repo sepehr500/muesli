@@ -340,23 +340,47 @@ pub struct TranscriptRow {
     pub speaker: String,
     pub me: bool,
     pub text: String,
+    /// Meeting time of the row's first line (seconds).
+    pub start: f64,
+    /// Transcript line indices this row covers (inclusive), for sources and playback.
+    pub first: usize,
+    pub last: usize,
+}
+
+/// Index of the row playing at `t`: the last row that starts at or before it.
+pub fn row_at(rows: &[TranscriptRow], t: f64) -> Option<usize> {
+    rows.iter().rposition(|r| r.start <= t + 0.05)
+}
+
+/// Index of the row containing transcript line `line`.
+pub fn row_of_line(rows: &[TranscriptRow], line: usize) -> Option<usize> {
+    rows.iter().position(|r| (r.first..=r.last).contains(&line))
+}
+
+/// "01:02 / 42:10".
+pub fn play_time(pos: f64, total: f64) -> String {
+    format!("{} / {}", timestamp(pos), timestamp(total))
 }
 
 /// Consecutive segments from the same speaker are merged into one row.
 pub fn transcript_rows(segs: &[Segment], names: &BTreeMap<String, String>) -> Vec<TranscriptRow> {
     use muesli_core::model::Speaker;
-    segs.iter().fold(Vec::<TranscriptRow>::new(), |mut rows, s| {
+    segs.iter().enumerate().fold(Vec::<TranscriptRow>::new(), |mut rows, (i, s)| {
         let speaker = display_speaker(&s.speaker, names);
         match rows.last_mut() {
             Some(r) if r.speaker == speaker => {
                 r.text.push(' ');
                 r.text.push_str(s.text.trim());
+                r.last = i;
             }
             _ => rows.push(TranscriptRow {
                 time: timestamp(s.t_start),
                 speaker,
                 me: s.speaker == Speaker::Me,
                 text: s.text.trim().to_string(),
+                start: s.t_start,
+                first: i,
+                last: i,
             }),
         }
         rows
@@ -542,8 +566,8 @@ mod tests {
         assert_eq!(filter_meetings(&ms, "pricing", &[b.id.clone()])[0].id, b.id);
 
         let n = EnhancedNotes {
-            sections: vec![NoteSection { title: "Decisions".into(), items: vec![NoteItem { text: "Ship".into(), from_user: true, detail: None }] }],
-            action_items: vec![ActionItem { text: "Spec".into(), owner: None, from_user: false, done: false }],
+            sections: vec![NoteSection { title: "Decisions".into(), items: vec![NoteItem { text: "Ship".into(), from_user: true, detail: None, sources: vec![] }] }],
+            action_items: vec![ActionItem { text: "Spec".into(), owner: None, from_user: false, done: false, sources: vec![] }],
         };
         assert_eq!(copy_text("T", Some(&n), ""), "# T\n\n## Decisions\n\n- Ship\n\n## Action items\n\n- [ ] Spec\n");
         assert_eq!(copy_text("T", None, " - mine "), "# T\n\n- mine\n");
@@ -558,6 +582,11 @@ mod tests {
         assert_eq!(rows[0].text, "Hi. Ready?");
         assert_eq!((rows[1].time.as_str(), rows[1].speaker.as_str()), ("03:12", "Speaker 1"));
         assert_eq!(timestamp(3723.0), "1:02:03");
+        assert_eq!((rows[0].first, rows[0].last, rows[1].first), (0, 1, 2));
+        assert_eq!(row_at(&rows, 1.0), Some(0));
+        assert_eq!(row_at(&rows, 200.0), Some(1));
+        assert_eq!(row_of_line(&rows, 1), Some(0));
+        assert_eq!(play_time(62.0, 2530.0), "01:02 / 42:10");
         assert_eq!(transcript_text("Sync", &rows), "Sync\n\n[00:00] You: Hi. Ready?\n[03:12] Speaker 1: Yes\n");
     }
 

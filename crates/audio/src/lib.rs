@@ -6,3 +6,4 @@ pub mod clean;
 pub mod dsp;
 pub mod oggopus;
 pub mod opus;
+pub mod playback;

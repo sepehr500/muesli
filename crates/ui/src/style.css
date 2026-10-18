@@ -369,6 +369,32 @@ menubutton.speaker-btn > button {
 menubutton.speaker-btn > button:hover, menubutton.speaker-btn > button:checked { background: var(--hover); }
 .rename-pop { padding: 6px; }
 .rename-hint { font-size: 12px; line-height: 16px; color: var(--slate); }
+button.source {
+  min-height: 0; min-width: 0; padding: 1px 6px; margin-top: 2px;
+  border-radius: 6px; border: 1px solid var(--hairline); background: none; box-shadow: none;
+  font-family: "JetBrains Mono", "JetBrainsMono Nerd Font", monospace; font-size: 11px; line-height: 16px; color: var(--slate);
+}
+button.source:hover { color: var(--gentian); border-color: var(--gentian); background: var(--gentian-soft); }
+button.ts-btn {
+  min-height: 0; min-width: 0; padding: 1px 4px; margin: -1px -4px;
+  border-radius: 5px; background: none; box-shadow: none; border: none;
+  font-family: "JetBrains Mono", "JetBrainsMono Nerd Font", monospace; font-size: 12px; line-height: 16px; color: var(--slate);
+}
+button.ts-btn:hover { background: var(--hover); color: var(--gentian); }
+.t-row { padding: 6px 8px; margin: -6px -8px; border-radius: 8px; }
+.t-row.playing { background: var(--gentian-soft); }
+.t-row.cited { background: var(--hover); box-shadow: inset 2px 0 0 var(--gentian); }
+.player { min-height: 56px; padding: 0 20px 0 16px; border-top: 1px solid var(--hairline); }
+button.play {
+  min-width: 32px; min-height: 32px; padding: 0; border-radius: 16px;
+  background: var(--gentian); color: var(--snow); box-shadow: none; border: none;
+}
+button.play:hover { filter: brightness(1.08); }
+button.play muesli-icon { color: var(--snow); }
+scale.scrub trough { min-height: 4px; border-radius: 2px; background: var(--hairline); }
+scale.scrub highlight { border-radius: 2px; background: var(--gentian); }
+scale.scrub slider { min-width: 12px; min-height: 12px; margin: -5px; border-radius: 6px; background: var(--gentian); box-shadow: none; border: none; }
+.play-time { min-width: 92px; }
 .utterance { font-size: 14px; line-height: 22px; color: var(--granite); }
 .drawer-empty { font-size: 13px; color: var(--slate); }
 

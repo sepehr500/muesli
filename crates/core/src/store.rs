@@ -216,7 +216,7 @@ pub fn replace_segments(c: &mut Connection, id: &str, segs: &[Segment]) -> Resul
 
 pub fn segments(c: &Connection, id: &str) -> Result<Vec<Segment>> {
     let mut st = c.prepare(
-        "SELECT speaker, t_start, t_end, text FROM segments WHERE meeting_id=?1 ORDER BY t_start",
+        "SELECT speaker, t_start, t_end, text FROM segments WHERE meeting_id=?1 ORDER BY t_start, rowid",
     )?;
     let rows = st.query_map([id], |r| {
         Ok(Segment {

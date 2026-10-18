@@ -25,11 +25,11 @@ fn seg(who: &str, t: f64, text: &str) -> Segment {
 }
 
 fn item(text: &str, from_user: bool, detail: Option<&str>) -> NoteItem {
-    NoteItem { text: text.into(), from_user, detail: detail.map(String::from) }
+    NoteItem { text: text.into(), from_user, detail: detail.map(String::from), sources: vec![] }
 }
 
 fn action(text: &str, owner: &str, from_user: bool) -> ActionItem {
-    ActionItem { text: text.into(), owner: Some(owner.into()), from_user, done: false }
+    ActionItem { text: text.into(), owner: Some(owner.into()), from_user, done: false, sources: vec![] }
 }
 
 fn done_pipeline() -> Pipeline {

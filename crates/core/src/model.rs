@@ -194,6 +194,9 @@ pub struct NoteItem {
     /// AI elaboration shown on its own line beneath `text`.
     #[serde(default)]
     pub detail: Option<String>,
+    /// Transcript line indices that support this point (validated against the transcript).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -205,6 +208,9 @@ pub struct ActionItem {
     pub from_user: bool,
     #[serde(default)]
     pub done: bool,
+    /// Transcript line indices that support this point (validated against the transcript).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<usize>,
 }
 
 impl EnhancedNotes {
@@ -285,12 +291,14 @@ mod tests {
             sections: vec![NoteSection {
                 title: "Decisions".into(),
                 items: vec![NoteItem {
+                    sources: vec![],
                     text: "Ship offline mode".into(),
                     from_user: true,
                     detail: Some("Dec 12 release.".into()),
                 }],
             }],
             action_items: vec![ActionItem {
+                sources: vec![],
                 text: "Write spec".into(),
                 owner: Some("You".into()),
                 from_user: true,
