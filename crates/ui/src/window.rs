@@ -1,0 +1,1358 @@
+//! The main window: a thin GTK shell over `vm` + `store` + daemon IPC.
+
+use crate::daemon::{self, Msg};
+use crate::icons::{self, IconView};
+use crate::settings;
+use crate::vm::{self, FooterKind, Indicator, TitleAction};
+use crate::widgets::*;
+use adw::prelude::*;
+use chrono::Local;
+use gtk::{gdk, gio, glib};
+use muesli_core::ipc::{Request, SessionView, Status};
+use muesli_core::model::{EnhancedNotes, Meeting, MeetingState, Notes, Segment};
+use muesli_core::openrouter::Message;
+use muesli_core::{config, prompts, store, transcript};
+use std::cell::RefCell;
+use std::collections::HashSet;
+use std::rc::Rc;
+use std::time::Duration;
+
+const COLUMN: i32 = 688;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Mine,
+    Enhanced,
+}
+
+#[derive(Default)]
+struct State {
+    meetings: Vec<Meeting>,
+    fts: Vec<String>,
+    query: String,
+    search_gen: u64,
+    selected: Option<String>,
+    current: Option<Meeting>,
+    notes: Option<Notes>,
+    status: Option<Status>,
+    skipped: HashSet<String>,
+    mode: Option<(String, Mode)>,
+    /// Programmatic widget updates in progress: ignore change signals.
+    loading: bool,
+    notes_for: Option<String>,
+    /// The user typed in the title since it was last loaded.
+    title_dirty: bool,
+    notes_dirty: bool,
+    notes_gen: u64,
+    /// Switch to Enhanced once notes newer than this land.
+    awaiting_enhance: Option<(String, i64)>,
+}
+
+struct FooterUi {
+    root: gtk::Box,
+    icon: IconView,
+    title: gtk::Label,
+    sub: gtk::Label,
+    actions: gtk::Box,
+}
+
+pub struct Win {
+    pub window: adw::ApplicationWindow,
+    db: rusqlite::Connection,
+    st: RefCell<State>,
+    toasts: adw::ToastOverlay,
+    // sidebar
+    list: gtk::Box,
+    search: gtk::Text,
+    plus_pop: gtk::Box,
+    footer: FooterUi,
+    // main
+    split: adw::OverlaySplitView,
+    pages: gtk::Stack,
+    top_left: gtk::Box,
+    top_right: gtk::Box,
+    btn_mine: gtk::ToggleButton,
+    btn_enh: gtk::ToggleButton,
+    enhance_btn: gtk::Button,
+    column: gtk::Box,
+    meta: gtk::Box,
+    eyebrow: gtk::Label,
+    title_wrap: gtk::Box,
+    title: gtk::TextView,
+    naming: gtk::Box,
+    chips: adw::WrapBox,
+    body: gtk::Stack,
+    enhanced: gtk::Box,
+    notes_view: gtk::TextView,
+    notes_placeholder: gtk::Label,
+    wrapping: gtk::Box,
+    // ask
+    ask_root: gtk::Widget,
+    ask_entry: gtk::Text,
+    ask_model: gtk::Label,
+    thread_rev: gtk::Revealer,
+    thread: gtk::Box,
+    thread_scroll: gtk::ScrolledWindow,
+    // transcript
+    drawer_body: gtk::Box,
+}
+
+fn text_of(view: &gtk::TextView) -> String {
+    let b = view.buffer();
+    b.text(&b.start_iter(), &b.end_iter(), false).to_string()
+}
+
+fn tview(classes: &[&str]) -> gtk::TextView {
+    let t = gtk::TextView::new();
+    t.set_wrap_mode(gtk::WrapMode::WordChar);
+    t.set_css_classes(classes);
+    t.set_hexpand(true);
+    t
+}
+
+fn toggle(text: &str) -> gtk::ToggleButton {
+    let b = gtk::ToggleButton::with_label(text);
+    b.set_valign(gtk::Align::Center);
+    b
+}
+
+impl Win {
+    pub fn new(app: &adw::Application) -> Rc<Win> {
+        let db = store::open_default().expect("open muesli database");
+        let window = adw::ApplicationWindow::builder()
+            .application(app)
+            .title("Muesli")
+            .default_width(1280)
+            .default_height(820)
+            .width_request(860)
+            .height_request(560)
+            .build();
+        window.add_css_class("muesli");
+
+        // ---------------------------------------------------------------- sidebar
+        let plus_pop = vbox(10, &[]);
+        let plus = gtk::MenuButton::new();
+        plus.set_child(Some(&IconView::new(&icons::PLUS)));
+        plus.set_css_classes(&["boxed-icon"]);
+        plus.set_valign(gtk::Align::End);
+        plus.set_tooltip_text(Some("New recording"));
+        let pop = gtk::Popover::new();
+        pop.add_css_class("muesli-pop");
+        pop.set_child(Some(&plus_pop));
+        plus.set_popover(Some(&pop));
+
+        let brand = with(vbox(10, &[]), &[IconView::new(&icons::LOGO).upcast_ref(), label("muesli", &["brand"]).upcast_ref()]);
+        brand.set_hexpand(true);
+        brand.set_halign(gtk::Align::Start);
+        let brand_row = with(hbox(0, &["brand-box"]), &[brand.upcast_ref(), plus.upcast_ref()]);
+
+        let search = gtk::Text::new();
+        search.set_placeholder_text(Some("Search meetings"));
+        search.set_hexpand(true);
+        search.set_width_chars(1);
+        let search_box = with(
+            hbox(8, &["search"]),
+            &[IconView::new(&icons::SEARCH).upcast_ref(), search.upcast_ref(), label("/", &["kbd"]).upcast_ref()],
+        );
+
+        let list = vbox(0, &["meeting-list"]);
+        let list_scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vexpand(true)
+            .child(&list)
+            .build();
+        let top = with(vbox(0, &["sidebar-top"]), &[brand_row.upcast_ref(), search_box.upcast_ref(), list_scroll.upcast_ref()]);
+        top.set_vexpand(true);
+
+        let footer = FooterUi {
+            root: hbox(10, &["footer"]),
+            icon: IconView::new(&icons::LISTENING),
+            title: ellipsized("", &["footer-title"]),
+            sub: ellipsized("", &["footer-sub"]),
+            actions: hbox(4, &[]),
+        };
+        let footer_text = with(vbox(1, &[]), &[footer.title.upcast_ref(), footer.sub.upcast_ref()]);
+        footer_text.set_hexpand(true);
+        footer_text.set_valign(gtk::Align::Center);
+        let settings_btn = gtk::Button::new();
+        settings_btn.set_child(Some(&IconView::new(&icons::SLIDERS)));
+        settings_btn.set_css_classes(&["flat-icon"]);
+        settings_btn.set_tooltip_text(Some("Settings"));
+        footer.actions.set_valign(gtk::Align::Center);
+        [footer.icon.upcast_ref::<gtk::Widget>(), footer_text.upcast_ref(), footer.actions.upcast_ref(), settings_btn.upcast_ref()]
+            .iter()
+            .for_each(|w| footer.root.append(*w));
+
+        let sidebar = with(
+            vbox(0, &["sidebar"]),
+            &[top.upcast_ref(), IconView::sized(&icons::VIGNETTE, 272, 132).upcast_ref(), footer.root.upcast_ref()],
+        );
+        sidebar.set_size_request(272, -1);
+        sidebar.set_hexpand(false);
+
+        // ---------------------------------------------------------------- top bar
+        let btn_mine = toggle("My notes");
+        let btn_enh = toggle("Enhanced");
+        btn_enh.set_group(Some(&btn_mine));
+        let seg = with(hbox(2, &["segmented"]), &[btn_mine.upcast_ref(), btn_enh.upcast_ref()]);
+        seg.set_valign(gtk::Align::Center);
+        let enhance_btn = icon_button(&icons::SPARKLE, Some("Enhance"), &["outline", "accent"]);
+        enhance_btn.set_valign(gtk::Align::Center);
+        let top_left = with(hbox(12, &[]), &[seg.upcast_ref(), enhance_btn.upcast_ref()]);
+        top_left.set_hexpand(true);
+
+        let transcript_btn = gtk::ToggleButton::new();
+        transcript_btn.set_child(Some(&with(
+            hbox(8, &[]),
+            &[IconView::new(&icons::WAVEFORM).upcast_ref(), label("Transcript", &[]).upcast_ref()],
+        )));
+        transcript_btn.set_css_classes(&["outline"]);
+        transcript_btn.set_valign(gtk::Align::Center);
+        let copy_btn = icon_button(&icons::COPY, Some("Copy"), &["outline"]);
+        copy_btn.set_valign(gtk::Align::Center);
+        let menu = gio::Menu::new();
+        menu.append(Some("Rename"), Some("win.rename"));
+        menu.append(Some("Re-enhance notes"), Some("win.enhance"));
+        menu.append(Some("Reprocess recording"), Some("win.reprocess"));
+        let danger = gio::Menu::new();
+        danger.append(Some("Delete meeting…"), Some("win.delete"));
+        menu.append_section(None, &danger);
+        let more = gtk::MenuButton::new();
+        more.set_child(Some(&IconView::new(&icons::ELLIPSIS)));
+        more.set_css_classes(&["flat-icon"]);
+        more.set_menu_model(Some(&menu));
+        more.set_valign(gtk::Align::Center);
+        let top_right = with(hbox(8, &[]), &[transcript_btn.upcast_ref(), copy_btn.upcast_ref(), more.upcast_ref()]);
+        let topbar = with(hbox(0, &["topbar"]), &[top_left.upcast_ref(), top_right.upcast_ref()]);
+        let handle = gtk::WindowHandle::new();
+        handle.set_child(Some(&topbar));
+
+        // ---------------------------------------------------------------- meeting column
+        let meta = hbox(20, &[]);
+        let eyebrow = label("NAME THIS MEETING", &["eyebrow"]);
+        let title = tview(&["title"]);
+        title.set_accepts_tab(false);
+        let title_wrap = with(vbox(0, &["title-wrap"]), &[title.upcast_ref()]);
+
+        let chips = adw::WrapBox::new();
+        chips.set_child_spacing(8);
+        chips.set_line_spacing(8);
+        let suggestion_hint = with(
+            hbox(6, &[]),
+            &[IconView::sized(&icons::SPARKLE, 14, 14).upcast_ref(), label("Or pick a suggestion", &["hint"]).upcast_ref()],
+        );
+        let save = gtk::Button::new();
+        save.set_child(Some(&with(hbox(10, &[]), &[label("Save", &[]).upcast_ref(), label("↵", &["key"]).upcast_ref()])));
+        save.set_css_classes(&["primary"]);
+        let skip = gtk::Button::with_label("Skip for now");
+        skip.set_css_classes(&["skip"]);
+        let buttons = with(hbox(16, &[]), &[save.upcast_ref(), skip.upcast_ref()]);
+        buttons.set_margin_top(28);
+        buttons.set_halign(gtk::Align::Start);
+        let naming = with(vbox(12, &[]), &[suggestion_hint.upcast_ref(), chips.upcast_ref()]);
+        naming.set_margin_top(20);
+        let naming = with(vbox(0, &[]), &[naming.upcast_ref(), buttons.upcast_ref()]);
+
+        let enhanced = vbox(0, &[]);
+        let notes_view = tview(&["user-notes"]);
+        notes_view.set_vexpand(true);
+        notes_view.set_size_request(-1, 240);
+        let notes_placeholder = para(
+            "Jot down anything worth remembering. After the call, muesli turns these bullets and the transcript into clean notes.",
+            &["notes-placeholder"],
+        );
+        notes_placeholder.set_valign(gtk::Align::Start);
+        notes_placeholder.set_can_target(false);
+        let mine = gtk::Overlay::new();
+        mine.set_child(Some(&notes_view));
+        mine.add_overlay(&notes_placeholder);
+        let wrapping = vbox(0, &[]);
+        wrapping.set_vexpand(true);
+        let body = gtk::Stack::new();
+        body.set_vhomogeneous(false);
+        body.set_transition_type(gtk::StackTransitionType::Crossfade);
+        body.set_transition_duration(150);
+        body.set_vexpand(true);
+        body.add_named(&enhanced, Some("enhanced"));
+        body.add_named(&mine, Some("mine"));
+        body.add_named(&wrapping, Some("wrapping"));
+
+        let column = with(
+            vbox(0, &["column"]),
+            &[meta.upcast_ref(), eyebrow.upcast_ref(), title_wrap.upcast_ref(), naming.upcast_ref(), body.upcast_ref()],
+        );
+        let clamp = LeftClamp::new(COLUMN, &column);
+        clamp.set_margin_start(96);
+        clamp.set_margin_end(56);
+        let scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vexpand(true)
+            .child(&clamp)
+            .build();
+
+        // ---------------------------------------------------------------- ask bar
+        let ask_entry = gtk::Text::new();
+        ask_entry.set_placeholder_text(Some("Ask about this meeting…"));
+        ask_entry.set_hexpand(true);
+        ask_entry.set_width_chars(1);
+        let ask_model = label("", &["model"]);
+        let send = gtk::Button::new();
+        send.set_child(Some(&IconView::new(&icons::SEND)));
+        send.set_css_classes(&["send"]);
+        send.set_valign(gtk::Align::Center);
+        send.set_tooltip_text(Some("Ask"));
+        let ask_bar = with(
+            hbox(12, &["ask"]),
+            &[IconView::new(&icons::ASK).upcast_ref(), ask_entry.upcast_ref(), ask_model.upcast_ref(), send.upcast_ref()],
+        );
+        let thread = vbox(0, &["thread-body"]);
+        let thread_scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_height(true)
+            .max_content_height(320)
+            .child(&thread)
+            .build();
+        let thread_close = gtk::Button::new();
+        thread_close.set_child(Some(&IconView::new(&icons::CLOSE)));
+        thread_close.set_css_classes(&["flat-icon"]);
+        let thread_head_label = label("ASKED ABOUT THIS MEETING", &["section-label"]);
+        thread_head_label.set_hexpand(true);
+        let thread_card = with(
+            vbox(0, &["thread"]),
+            &[with(hbox(0, &["thread-head"]), &[thread_head_label.upcast_ref(), thread_close.upcast_ref()]).upcast_ref(), thread_scroll.upcast_ref()],
+        );
+        let thread_rev = gtk::Revealer::builder()
+            .transition_type(gtk::RevealerTransitionType::SlideUp)
+            .transition_duration(150)
+            .child(&thread_card)
+            .build();
+        let ask_col = with(vbox(0, &[]), &[thread_rev.upcast_ref(), ask_bar.upcast_ref()]);
+        let ask_clamp = LeftClamp::new(COLUMN, &ask_col);
+        ask_clamp.set_margin_start(96);
+        ask_clamp.set_margin_end(56);
+        ask_clamp.set_margin_bottom(28);
+        ask_clamp.set_valign(gtk::Align::End);
+        let overlay = gtk::Overlay::new();
+        overlay.set_child(Some(&scroll));
+        overlay.add_overlay(&ask_clamp);
+
+        // ---------------------------------------------------------------- empty state
+        let empty_title = label("Listening for calls.", &["empty-title"]);
+        empty_title.set_margin_top(32);
+        empty_title.set_halign(gtk::Align::Center);
+        let empty_body = para("Join a Zoom or Discord call and muesli will take it from there.", &["empty-body"]);
+        empty_body.set_margin_top(10);
+        empty_body.set_justify(gtk::Justification::Center);
+        empty_body.set_xalign(0.5);
+        empty_body.set_max_width_chars(40);
+        let empty = with(
+            vbox(0, &[]),
+            &[IconView::sized(&icons::VIGNETTE, 408, 198).upcast_ref(), empty_title.upcast_ref(), empty_body.upcast_ref()],
+        );
+        empty.set_valign(gtk::Align::Center);
+        empty.set_halign(gtk::Align::Center);
+        empty.set_margin_bottom(56);
+
+        let pages = gtk::Stack::new();
+        pages.set_transition_type(gtk::StackTransitionType::Crossfade);
+        pages.set_transition_duration(150);
+        pages.add_named(&overlay, Some("meeting"));
+        pages.add_named(&empty, Some("empty"));
+        pages.set_vexpand(true);
+
+        let main = with(vbox(0, &[]), &[handle.upcast_ref(), pages.upcast_ref()]);
+        main.set_hexpand(true);
+
+        // ---------------------------------------------------------------- transcript drawer
+        let drawer_close = gtk::Button::new();
+        drawer_close.set_child(Some(&IconView::new(&icons::CLOSE)));
+        drawer_close.set_css_classes(&["flat-icon"]);
+        drawer_close.set_valign(gtk::Align::Center);
+        let drawer_title = label("TRANSCRIPT", &["drawer-title"]);
+        drawer_title.set_hexpand(true);
+        let drawer_body = vbox(18, &["drawer-body"]);
+        let drawer = with(
+            vbox(0, &["drawer"]),
+            &[
+                with(hbox(0, &["drawer-head"]), &[drawer_title.upcast_ref(), drawer_close.upcast_ref()]).upcast_ref(),
+                gtk::ScrolledWindow::builder()
+                    .hscrollbar_policy(gtk::PolicyType::Never)
+                    .vexpand(true)
+                    .child(&drawer_body)
+                    .build()
+                    .upcast_ref(),
+            ],
+        );
+        let split = adw::OverlaySplitView::builder()
+            .content(&main)
+            .sidebar(&drawer)
+            .sidebar_position(gtk::PackType::End)
+            .collapsed(false)
+            .show_sidebar(false)
+            .min_sidebar_width(320.0)
+            .max_sidebar_width(400.0)
+            .sidebar_width_fraction(0.32)
+            .build();
+        split.set_hexpand(true);
+
+        // Natural width = design width; long titles ellipsize instead of widening the sidebar.
+        let sidebar = LeftClamp::new(273, &sidebar);
+        sidebar.set_hexpand(false);
+        let root = with(hbox(0, &[]), &[sidebar.upcast_ref(), split.upcast_ref()]);
+        let toasts = adw::ToastOverlay::new();
+        toasts.set_child(Some(&root));
+        window.set_content(Some(&toasts));
+
+        let win = Rc::new(Win {
+            window,
+            db,
+            st: RefCell::new(State::default()),
+            toasts,
+            list,
+            search,
+            plus_pop,
+            footer,
+            split,
+            pages,
+            top_left,
+            top_right,
+            btn_mine,
+            btn_enh,
+            enhance_btn,
+            column,
+            meta,
+            eyebrow,
+            title_wrap,
+            title,
+            naming,
+            chips,
+            body,
+            enhanced,
+            notes_view,
+            notes_placeholder,
+            wrapping,
+            ask_root: ask_clamp.upcast(),
+            ask_entry,
+            ask_model,
+            thread_rev,
+            thread,
+            thread_scroll,
+            drawer_body,
+        });
+
+        // ---------------------------------------------------------------- wiring
+        transcript_btn.bind_property("active", &win.split, "show-sidebar").bidirectional().sync_create().build();
+        drawer_close.connect_clicked(glib::clone!(#[weak] transcript_btn, move |_| transcript_btn.set_active(false)));
+        thread_close.connect_clicked(glib::clone!(#[strong] win, move |_| win.thread_rev.set_reveal_child(false)));
+        settings_btn.connect_clicked(glib::clone!(#[strong] win, move |_| {
+            let w = win.clone();
+            settings::show(&win.window, move || w.render_ask_model());
+        }));
+        copy_btn.connect_clicked(glib::clone!(#[strong] win, move |_| win.copy()));
+        save.connect_clicked(glib::clone!(#[strong] win, move |_| win.commit_title()));
+        skip.connect_clicked(glib::clone!(#[strong] win, move |_| win.skip_naming()));
+        win.enhance_btn.connect_clicked(glib::clone!(#[strong] win, move |_| win.enhance()));
+        send.connect_clicked(glib::clone!(#[strong] win, move |_| win.ask()));
+        win.ask_entry.connect_activate(glib::clone!(#[strong] win, move |_| win.ask()));
+        let focus = gtk::EventControllerFocus::new();
+        focus.connect_enter(glib::clone!(#[strong] win, move |_| {
+            if win.thread.first_child().is_some() {
+                win.thread_rev.set_reveal_child(true);
+            }
+        }));
+        win.ask_entry.add_controller(focus);
+
+        for (btn, mode) in [(&win.btn_mine, Mode::Mine), (&win.btn_enh, Mode::Enhanced)] {
+            btn.connect_toggled(glib::clone!(#[strong] win, move |b| {
+                if b.is_active() && !win.st.borrow().loading {
+                    win.set_mode(mode);
+                }
+            }));
+        }
+
+        win.search.connect_changed(glib::clone!(#[strong] win, move |e| win.on_search(e.text().to_string())));
+        let search_keys = gtk::EventControllerKey::new();
+        search_keys.connect_key_pressed(glib::clone!(#[strong] win, move |_, key, _, _| {
+            match key {
+                gdk::Key::Escape => {
+                    win.search.set_text("");
+                    win.unfocus();
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
+            }
+        }));
+        win.search.add_controller(search_keys);
+
+        let title_keys = gtk::EventControllerKey::new();
+        title_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        title_keys.connect_key_pressed(glib::clone!(#[strong] win, move |_, key, _, _| {
+            match key {
+                gdk::Key::Return | gdk::Key::KP_Enter => {
+                    win.commit_title();
+                    glib::Propagation::Stop
+                }
+                gdk::Key::Escape => {
+                    win.unfocus();
+                    win.render_meeting(true);
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
+            }
+        }));
+        win.title.add_controller(title_keys);
+        let title_focus = gtk::EventControllerFocus::new();
+        title_focus.connect_leave(glib::clone!(#[strong] win, move |_| {
+            let (naming, dirty) = (win.naming.is_visible(), win.st.borrow().title_dirty);
+            if !naming && dirty {
+                win.commit_title();
+            }
+        }));
+        win.title.add_controller(title_focus);
+        win.title.buffer().connect_changed(glib::clone!(#[strong] win, move |_| {
+            if !win.st.borrow().loading {
+                win.st.borrow_mut().title_dirty = true;
+            }
+            win.sync_chip_selection();
+        }));
+
+        win.notes_view.buffer().connect_changed(glib::clone!(#[strong] win, move |b| win.on_notes_changed(b.char_count() == 0)));
+
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(glib::clone!(#[strong] win, move |_, key, _, state| {
+            let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
+            match (key, ctrl) {
+                (gdk::Key::slash, false) | (gdk::Key::k, true) | (gdk::Key::f, true) => {
+                    win.search.grab_focus();
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
+            }
+        }));
+        win.window.add_controller(keys);
+
+        win.install_actions();
+        win.render_ask_model();
+        win.render_footer();
+        win.render_plus();
+        win.reload_list();
+
+        let (tx, rx) = async_channel::unbounded();
+        daemon::spawn_watch(tx);
+        glib::spawn_future_local(glib::clone!(#[strong] win, async move {
+            while let Ok(msg) = rx.recv().await {
+                win.on_daemon(msg);
+            }
+        }));
+        glib::timeout_add_seconds_local(1, glib::clone!(#[strong] win, move || {
+            let recording = matches!(win.st.borrow().status.as_ref().map(|s| &s.session), Some(SessionView::Recording { .. }));
+            if recording {
+                win.render_footer();
+            }
+            glib::ControlFlow::Continue
+        }));
+        win.window.connect_close_request(glib::clone!(#[strong] win, move |_| {
+            win.flush_notes();
+            glib::Propagation::Proceed
+        }));
+        win
+    }
+
+    /// Initial focus: the title while naming, otherwise nothing (no stray focus ring).
+    pub fn settle_focus(&self) {
+        match self.naming.is_visible() && self.pages.visible_child_name().as_deref() == Some("meeting") {
+            true => {
+                self.title.grab_focus();
+                let b = self.title.buffer();
+                b.place_cursor(&b.end_iter());
+            }
+            false => self.unfocus(),
+        }
+    }
+
+    /// Dev aid for screenshots (`MUESLI_UI_DEMO=mine|transcript|settings|plus|ask`).
+    pub fn demo(self: &Rc<Self>, what: &str) {
+        match what {
+            "mine" => self.btn_mine.set_active(true),
+            "transcript" => self.split.set_show_sidebar(true),
+            "settings" => {
+                let w = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(300), move || settings::show(&w.window, || {}));
+            }
+            "ask" => {
+                self.ask_entry.set_text("What did we decide about Windows?");
+                self.thread.append(&chat_label("user", "What did we decide about Windows?"));
+                self.thread.append(&chat_label("assistant", "Drop the Windows beta for now — it's under 3% of signups. Revisit in Q1 if demand grows."));
+                self.thread_rev.set_reveal_child(true);
+            }
+            _ => {}
+        }
+    }
+
+    fn install_actions(self: &Rc<Self>) {
+        let action = |name: &str, f: fn(&Rc<Win>)| {
+            let a = gio::SimpleAction::new(name, None);
+            let w = self.clone();
+            a.connect_activate(move |_, _| f(&w));
+            self.window.add_action(&a);
+        };
+        action("rename", |w| {
+            w.title.grab_focus();
+            let b = w.title.buffer();
+            b.select_range(&b.start_iter(), &b.end_iter());
+        });
+        action("enhance", |w| w.enhance());
+        action("reprocess", |w| w.simple_request(|id| Request::Reprocess { id }, "Reprocessing…"));
+        action("delete", |w| w.confirm_delete());
+    }
+
+    fn unfocus(&self) {
+        GtkWindowExt::set_focus(&self.window, None::<&gtk::Widget>);
+    }
+
+    fn toast(&self, text: &str) {
+        self.toasts.add_toast(adw::Toast::builder().title(text).timeout(3).build());
+    }
+
+    // ------------------------------------------------------------------ daemon events
+
+    fn on_daemon(self: &Rc<Self>, msg: Msg) {
+        match msg {
+            Msg::Status(s) => {
+                self.st.borrow_mut().status = Some(s);
+                self.render_footer();
+                self.render_plus();
+                self.reload_list();
+            }
+            Msg::MeetingUpdated(id) => {
+                self.reload_list();
+                if self.st.borrow().selected.as_deref() == Some(&id) {
+                    self.render_meeting(false);
+                }
+            }
+            Msg::Disconnected => {
+                let was = self.st.borrow_mut().status.take().is_some();
+                if was {
+                    self.render_footer();
+                    self.render_plus();
+                }
+            }
+        }
+    }
+
+    fn send(self: &Rc<Self>, req: Request, ok_toast: Option<&'static str>) {
+        let w = self.clone();
+        glib::spawn_future_local(async move {
+            match daemon::request(req).await {
+                Ok(_) => {
+                    if let Some(t) = ok_toast {
+                        w.toast(t);
+                    }
+                }
+                Err(e) => w.toast(&e),
+            }
+        });
+    }
+
+    fn simple_request(self: &Rc<Self>, make: fn(String) -> Request, ok: &'static str) {
+        if let Some(id) = self.st.borrow().selected.clone() {
+            self.send(make(id), Some(ok));
+        }
+    }
+
+    // ------------------------------------------------------------------ sidebar
+
+    fn reload_list(self: &Rc<Self>) {
+        let meetings = store::list_meetings(&self.db, 500).unwrap_or_default();
+        let first = meetings.first().map(|m| m.id.clone());
+        let selected_gone = {
+            let mut st = self.st.borrow_mut();
+            st.meetings = meetings;
+            match &st.selected {
+                Some(id) => !st.meetings.iter().any(|m| &m.id == id),
+                None => true,
+            }
+        };
+        self.render_sidebar();
+        match (selected_gone, first) {
+            (true, Some(id)) => self.select(&id),
+            (true, None) => {
+                self.st.borrow_mut().selected = None;
+                self.render_meeting(true);
+            }
+            _ => {}
+        }
+    }
+
+    fn render_sidebar(self: &Rc<Self>) {
+        clear(&self.list);
+        let st = self.st.borrow();
+        let now = store::now_ms();
+        let filtered = vm::filter_meetings(&st.meetings, &st.query, &st.fts);
+        if filtered.is_empty() && !st.query.trim().is_empty() {
+            self.list.append(&para("No meetings match.", &["list-empty"]));
+        }
+        vm::group_by_day(&filtered, &Local, now).into_iter().for_each(|g| {
+            let group = vbox(2, &["group"]);
+            group.append(&label(&g.label.to_uppercase(), &["group-label"]));
+            g.meetings.iter().for_each(|m| group.append(&self.meeting_row(m, st.selected.as_deref() == Some(&m.id), now)));
+            self.list.append(&group);
+        });
+    }
+
+    fn meeting_row(self: &Rc<Self>, m: &Meeting, selected: bool, now: i64) -> gtk::Button {
+        let icon = IconView::new(icons::for_app(m.app));
+        icon.set_valign(gtk::Align::Start);
+        icon.set_margin_top(1);
+        let meta = ellipsized(&vm::row_meta(m, &Local, now), &["row-meta"]);
+        if m.state == MeetingState::Recording {
+            meta.add_css_class("recording");
+        }
+        let text = with(vbox(2, &[]), &[ellipsized(&m.display_title(), &["row-title"]).upcast_ref(), meta.upcast_ref()]);
+        text.set_hexpand(true);
+        let b = gtk::Button::new();
+        b.set_child(Some(&with(hbox(10, &[]), &[icon.upcast_ref(), text.upcast_ref()])));
+        b.set_css_classes(if selected { &["meeting-row", "selected"] } else { &["meeting-row"] });
+        let id = m.id.clone();
+        b.connect_clicked(glib::clone!(#[strong(rename_to = w)] self, move |_| w.select(&id)));
+        b
+    }
+
+    fn on_search(self: &Rc<Self>, q: String) {
+        let g = {
+            let mut st = self.st.borrow_mut();
+            st.query = q;
+            st.search_gen += 1;
+            st.search_gen
+        };
+        let w = self.clone();
+        glib::timeout_add_local_once(Duration::from_millis(220), move || {
+            if w.st.borrow().search_gen != g {
+                return;
+            }
+            let q = w.st.borrow().query.clone();
+            let fts = store::search(&w.db, &q, 500).unwrap_or_default();
+            w.st.borrow_mut().fts = fts;
+            w.render_sidebar();
+        });
+    }
+
+    pub fn select(self: &Rc<Self>, id: &str) {
+        self.flush_notes();
+        self.unfocus();
+        self.st.borrow_mut().selected = Some(id.to_string());
+        self.thread_rev.set_reveal_child(false);
+        self.render_sidebar();
+        self.render_meeting(true);
+    }
+
+    // ------------------------------------------------------------------ footer + plus
+
+    fn render_footer(self: &Rc<Self>) {
+        let st = self.st.borrow();
+        let f = vm::footer(st.status.as_ref(), store::now_ms());
+        self.footer.title.set_text(&f.title);
+        self.footer.sub.set_text(&f.subtitle);
+        self.footer.icon.set_icon(match f.kind {
+            FooterKind::Listening | FooterKind::Prompting => &icons::LISTENING,
+            FooterKind::Recording => &icons::RECORDING,
+            FooterKind::Offline => &icons::OFFLINE,
+        });
+        match f.kind {
+            FooterKind::Recording => self.footer.root.add_css_class("recording"),
+            _ => self.footer.root.remove_css_class("recording"),
+        }
+        let kind_changed = self.footer.actions.widget_name() != format!("{:?}", f.kind);
+        if !kind_changed {
+            return;
+        }
+        self.footer.actions.set_widget_name(&format!("{:?}", f.kind));
+        clear(&self.footer.actions);
+        let mini = |text: &str, classes: &[&str], req: Request| {
+            let b = gtk::Button::with_label(text);
+            b.set_css_classes(classes);
+            b.connect_clicked(glib::clone!(#[strong(rename_to = w)] self, move |_| w.send(req.clone(), None)));
+            self.footer.actions.append(&b);
+        };
+        match f.kind {
+            FooterKind::Prompting => {
+                mini("Record", &["mini"], Request::Record);
+                mini("Ignore", &["mini"], Request::Ignore);
+            }
+            FooterKind::Recording => mini("Stop", &["mini", "danger"], Request::Stop),
+            _ => {}
+        }
+    }
+
+    fn render_plus(self: &Rc<Self>) {
+        clear(&self.plus_pop);
+        let session = self.st.borrow().status.as_ref().map(|s| s.session.clone());
+        let button = |text: &str, classes: &[&str], req: Request| {
+            let b = gtk::Button::with_label(text);
+            b.set_css_classes(classes);
+            b.connect_clicked(glib::clone!(#[strong(rename_to = w)] self, move |b| {
+                if let Some(p) = b.ancestor(gtk::Popover::static_type()).and_downcast::<gtk::Popover>() {
+                    p.popdown();
+                }
+                w.send(req.clone(), None);
+            }));
+            b
+        };
+        let (title, sub) = match &session {
+            None => ("Daemon not running", "Start muesli-daemon to record calls."),
+            Some(SessionView::Recording { .. }) => ("Recording in progress", "Stop to process it, or discard it."),
+            Some(_) => ("New recording", "Record what you hear and say, right now."),
+        };
+        self.plus_pop.append(&label(title, &["pop-title"]));
+        let sub = para(sub, &["pop-sub"]);
+        sub.set_max_width_chars(28);
+        self.plus_pop.append(&sub);
+        match &session {
+            None => {}
+            Some(SessionView::Recording { .. }) => {
+                let row = with(
+                    hbox(8, &[]),
+                    &[button("Stop", &["primary"], Request::Stop).upcast_ref(), button("Discard", &["skip"], Request::Discard).upcast_ref()],
+                );
+                self.plus_pop.append(&row);
+            }
+            Some(_) => self.plus_pop.append(&button("Start recording now", &["primary"], Request::Start)),
+        }
+    }
+
+    // ------------------------------------------------------------------ meeting view
+
+    fn render_meeting(self: &Rc<Self>, full: bool) {
+        let id = self.st.borrow().selected.clone();
+        let m = id.as_deref().and_then(|id| store::get_meeting(&self.db, id).ok().flatten());
+        let Some(m) = m else {
+            self.pages.set_visible_child_name("empty");
+            self.top_left.set_visible(false);
+            self.top_right.set_visible(false);
+            self.st.borrow_mut().current = None;
+            return;
+        };
+        let notes = store::get_notes(&self.db, &m.id).unwrap_or(Notes {
+            meeting_id: m.id.clone(),
+            user_md: String::new(),
+            enhanced: None,
+            updated_at: 0,
+        });
+        let segs = store::segments(&self.db, &m.id).unwrap_or_default();
+        self.pages.set_visible_child_name("meeting");
+        self.top_left.set_visible(true);
+        self.top_right.set_visible(true);
+
+        let skipped = self.st.borrow().skipped.contains(&m.id);
+        let naming = vm::shows_naming(&m, skipped);
+        let wrapping = matches!(m.state, MeetingState::Processing | MeetingState::Failed);
+        let has_enhanced = notes.enhanced.as_ref().is_some_and(|n| !n.sections.is_empty() || !n.action_items.is_empty());
+
+        let mode = {
+            let mut st = self.st.borrow_mut();
+            let awaited = matches!(&st.awaiting_enhance, Some((aid, t)) if *aid == m.id && has_enhanced && notes.updated_at > *t);
+            if awaited {
+                st.awaiting_enhance = None;
+            }
+            let mode = match &st.mode {
+                Some((mid, mode)) if *mid == m.id && !awaited => *mode,
+                _ if has_enhanced => Mode::Enhanced,
+                _ => Mode::Mine,
+            };
+            st.mode = Some((m.id.clone(), mode));
+            st.loading = true;
+            mode
+        };
+
+        // Meta row.
+        clear(&self.meta);
+        let app = with(
+            hbox(6, &[]),
+            &[IconView::new(icons::for_app(m.app)).class("meta-app-icon").upcast_ref(), label(vm::app_label(m.app), &["meta-app"]).upcast_ref()],
+        );
+        self.meta.append(&app);
+        let item = |icon: &'static icons::Icon, text: &str| {
+            with(hbox(6, &[]), &[IconView::new(icon).upcast_ref(), label(text, &["meta"]).upcast_ref()])
+        };
+        self.meta.append(&item(&icons::CLOCK, &vm::time_range(&m, &Local)));
+        if let Some(people) = vm::people_line(&segs, &m.speaker_names) {
+            self.meta.append(&item(&icons::PEOPLE, &people));
+        }
+
+        // Title + naming chrome.
+        self.eyebrow.set_visible(naming);
+        self.naming.set_visible(naming);
+        match naming {
+            true => self.title_wrap.add_css_class("naming"),
+            false => self.title_wrap.remove_css_class("naming"),
+        }
+        if full || !self.title.has_focus() {
+            let text = if naming { vm::initial_title(&m) } else { m.display_title() };
+            self.title.buffer().set_text(&text);
+            self.st.borrow_mut().title_dirty = false;
+            // GtkTextView validates its layout lazily and can miss the relayout when its
+            // height grows from zero; nudge it once the layout is ready.
+            let t = self.title.clone();
+            glib::idle_add_local_once(move || t.queue_resize());
+        }
+        clear_wrap(&self.chips);
+        vm::chips(&m).into_iter().for_each(|c| {
+            let b = gtk::Button::with_label(&c.title);
+            b.set_css_classes(if c.fallback { &["chip", "fallback"] } else { &["chip"] });
+            b.set_widget_name(&c.title);
+            b.connect_clicked(glib::clone!(#[strong(rename_to = w)] self, move |b| {
+                w.title.buffer().set_text(&b.widget_name());
+                w.title.grab_focus();
+            }));
+            self.chips.append(&b);
+        });
+
+        // Body.
+        match wrapping {
+            true => {
+                self.column.add_css_class("wrapping");
+                clear(&self.wrapping);
+                self.wrapping.append(&self.wrapping_widget(&m));
+                self.body.set_visible_child_name("wrapping");
+            }
+            false => {
+                self.column.remove_css_class("wrapping");
+                clear(&self.enhanced);
+                match &notes.enhanced {
+                    Some(n) if has_enhanced => self.enhanced.append(&self.enhanced_widget(n)),
+                    _ => self.enhanced.append(&para(
+                        "No enhanced notes yet. Write a few bullets in My notes, then press Enhance.",
+                        &["empty-notes"],
+                    )),
+                }
+                self.body.set_visible_child_name(if mode == Mode::Enhanced { "enhanced" } else { "mine" });
+            }
+        }
+        let notes_owner_changed = self.st.borrow().notes_for.as_deref() != Some(&m.id);
+        let dirty = self.st.borrow().notes_dirty;
+        if full || notes_owner_changed || (!dirty && !self.notes_view.has_focus()) {
+            self.notes_view.buffer().set_text(&notes.user_md);
+            let t = self.notes_view.clone();
+            glib::idle_add_local_once(move || t.queue_resize());
+            let mut st = self.st.borrow_mut();
+            st.notes_for = Some(m.id.clone());
+            st.notes_dirty = false;
+        }
+        self.notes_placeholder.set_visible(self.notes_view.buffer().char_count() == 0);
+
+        // Top bar.
+        if let Some(seg) = self.btn_mine.parent() {
+            seg.set_visible(!wrapping);
+        }
+        self.btn_enh.set_sensitive(has_enhanced);
+        self.btn_mine.set_active(mode == Mode::Mine);
+        self.btn_enh.set_active(mode == Mode::Enhanced);
+        let can_enhance = !wrapping && mode == Mode::Mine && m.state == MeetingState::Ready;
+        self.enhance_btn.set_visible(can_enhance);
+        set_button_text(&self.enhance_btn, if has_enhanced { "Re-enhance" } else { "Enhance" });
+
+        // Ask + transcript.
+        self.ask_root.set_visible(!wrapping && m.state != MeetingState::Recording);
+        if full {
+            self.render_thread(&m.id);
+        }
+        self.render_transcript(&segs, &m);
+
+        {
+            let mut st = self.st.borrow_mut();
+            st.current = Some(m.clone());
+            st.notes = Some(notes);
+            st.loading = false;
+        }
+        self.sync_chip_selection();
+        if full && naming && self.window.is_visible() {
+            self.settle_focus();
+        }
+    }
+
+    fn set_mode(self: &Rc<Self>, mode: Mode) {
+        let id = self.st.borrow().selected.clone();
+        if let Some(id) = id {
+            self.st.borrow_mut().mode = Some((id, mode));
+            self.flush_notes();
+            self.render_meeting(false);
+        }
+    }
+
+    fn sync_chip_selection(&self) {
+        let typed = text_of(&self.title);
+        let mut child = self.chips.first_child();
+        while let Some(c) = child {
+            match c.widget_name().as_str() == typed.trim() {
+                true => c.add_css_class("selected"),
+                false => c.remove_css_class("selected"),
+            }
+            child = c.next_sibling();
+        }
+    }
+
+    fn wrapping_widget(self: &Rc<Self>, m: &Meeting) -> gtk::Box {
+        let root = vbox(0, &[]);
+        root.append(&spacer());
+        if m.state == MeetingState::Failed {
+            let err = para(m.error.as_deref().unwrap_or("Processing stopped."), &["error-line"]);
+            let retry = gtk::Button::with_label("Reprocess");
+            retry.set_css_classes(&["outline"]);
+            retry.set_halign(gtk::Align::Start);
+            retry.connect_clicked(glib::clone!(#[strong(rename_to = w)] self, move |_| {
+                w.simple_request(|id| Request::Reprocess { id }, "Reprocessing…")
+            }));
+            let fail = with(vbox(10, &[]), &[err.upcast_ref(), retry.upcast_ref()]);
+            fail.set_margin_bottom(24);
+            root.append(&fail);
+        }
+        let head_label = label("WRAPPING UP", &["section-label"]);
+        head_label.set_hexpand(true);
+        let summary = label(&vm::wrapping_summary(&m.pipeline), &["hint"]);
+        let head = with(hbox(0, &["wrap-head"]), &[head_label.upcast_ref(), summary.upcast_ref()]);
+        head.set_baseline_position(gtk::BaselinePosition::Center);
+        root.append(&head);
+        let rows = vm::wrapping_rows(&m.pipeline, m.duration_ms());
+        let n = rows.len();
+        rows.into_iter().enumerate().for_each(|(i, r)| {
+            let tile = gtk::CenterBox::new();
+            tile.add_css_class("tile");
+            tile.set_valign(gtk::Align::Center);
+            tile.set_hexpand(false);
+            tile.set_center_widget(Some(&IconView::new(icons::for_step(r.kind))));
+            let name = ellipsized(&r.label, &["wrap-label"]);
+            name.set_size_request(168, -1);
+            let detail = ellipsized(&r.detail, &["wrap-detail"]);
+            detail.set_hexpand(true);
+            let ind: gtk::Widget = match r.indicator {
+                Indicator::Check => IconView::new(&icons::CHECK).class("indicator").upcast(),
+                Indicator::Spinner => IconView::new(&icons::SPINNER).spinning().upcast(),
+                Indicator::Failed => IconView::new(&icons::ALERT).class("indicator").upcast(),
+                Indicator::None => gtk::Box::builder().width_request(16).build().upcast(),
+            };
+            let row = with(hbox(14, &["wrap-row"]), &[tile.upcast_ref(), name.upcast_ref(), detail.upcast_ref(), ind.upcast_ref()]);
+            [(r.active, "active"), (r.pending, "pending"), (r.indicator == Indicator::Failed, "failed"), (i + 1 == n, "last")]
+                .into_iter()
+                .filter(|(on, _)| *on)
+                .for_each(|(_, c)| row.add_css_class(c));
+            root.append(&row);
+        });
+        root
+    }
+
+    fn enhanced_widget(self: &Rc<Self>, n: &EnhancedNotes) -> gtk::Box {
+        let root = vbox(0, &[]);
+        n.sections.iter().for_each(|s| {
+            let sec = vbox(14, &["note-section"]);
+            sec.append(&label(&s.title.to_uppercase(), &["section-label"]));
+            s.items.iter().for_each(|it| {
+                let dash = label("–", &["note-dash"]);
+                dash.set_valign(gtk::Align::Start);
+                let text: gtk::Widget = match (it.from_user, &it.detail) {
+                    (true, Some(d)) => with(vbox(2, &[]), &[para(&it.text, &["note-text"]).upcast_ref(), para(d, &["note-detail"]).upcast_ref()]).upcast(),
+                    (true, None) => para(&it.text, &["note-text"]).upcast(),
+                    (false, Some(d)) => para(&format!("{} {}", it.text, d), &["note-ai"]).upcast(),
+                    (false, None) => para(&it.text, &["note-ai"]).upcast(),
+                };
+                if !it.from_user {
+                    dash.add_css_class("ai");
+                }
+                text.set_hexpand(true);
+                sec.append(&with(hbox(12, &[]), &[dash.upcast_ref(), text.upcast_ref()]));
+            });
+            root.append(&sec);
+        });
+        if !n.action_items.is_empty() {
+            let sec = vbox(10, &["note-section", "actions"]);
+            if n.sections.is_empty() {
+                sec.remove_css_class("actions");
+            }
+            sec.append(&label("ACTION ITEMS", &["section-label"]));
+            n.action_items.iter().enumerate().for_each(|(i, a)| {
+                let check = gtk::CheckButton::new();
+                check.set_css_classes(if a.from_user { &["todo", "mine"] } else { &["todo"] });
+                check.set_active(a.done);
+                check.set_valign(gtk::Align::Start);
+                let text = para(&a.text, &["action-text"]);
+                text.set_hexpand(true);
+                if !a.from_user {
+                    text.add_css_class("ai");
+                }
+                if a.done {
+                    text.add_css_class("done");
+                }
+                let owner = label(a.owner.as_deref().unwrap_or(""), &["owner"]);
+                owner.set_size_request(72, -1);
+                owner.set_xalign(1.0);
+                owner.set_valign(gtk::Align::Start);
+                check.connect_toggled(glib::clone!(#[strong(rename_to = w)] self, #[weak] text, move |c| {
+                    match c.is_active() {
+                        true => text.add_css_class("done"),
+                        false => text.remove_css_class("done"),
+                    }
+                    w.set_action_done(i, c.is_active());
+                }));
+                sec.append(&with(hbox(12, &[]), &[check.upcast_ref(), text.upcast_ref(), owner.upcast_ref()]));
+            });
+            root.append(&sec);
+        }
+        root
+    }
+
+    fn set_action_done(&self, i: usize, done: bool) {
+        let mut st = self.st.borrow_mut();
+        let Some(notes) = st.notes.as_mut() else { return };
+        let Some(enh) = notes.enhanced.as_mut() else { return };
+        if let Some(a) = enh.action_items.get_mut(i) {
+            a.done = done;
+            let _ = store::set_enhanced(&self.db, &notes.meeting_id, Some(enh));
+        }
+    }
+
+    fn render_transcript(&self, segs: &[Segment], m: &Meeting) {
+        clear(&self.drawer_body);
+        let rows = vm::transcript_rows(segs, &m.speaker_names);
+        if rows.is_empty() {
+            let text = match m.state {
+                MeetingState::Recording => "The transcript appears after the call.",
+                MeetingState::Processing => "Transcribing…",
+                _ => "No transcript for this meeting.",
+            };
+            self.drawer_body.append(&para(text, &["drawer-empty"]));
+            return;
+        }
+        rows.iter().for_each(|r| {
+            let who = label(&r.speaker, &["speaker"]);
+            if r.me {
+                who.add_css_class("me");
+            }
+            let head = with(hbox(8, &[]), &[label(&r.time, &["ts"]).upcast_ref(), who.upcast_ref()]);
+            let text = para(&r.text, &["utterance"]);
+            text.set_selectable(true);
+            self.drawer_body.append(&with(vbox(4, &[]), &[head.upcast_ref(), text.upcast_ref()]));
+        });
+    }
+
+    // ------------------------------------------------------------------ actions
+
+    fn commit_title(self: &Rc<Self>) {
+        if self.st.borrow().loading {
+            return;
+        }
+        let Some(m) = self.st.borrow().current.clone() else { return };
+        self.st.borrow_mut().title_dirty = false;
+        let typed = text_of(&self.title).replace('\n', " ");
+        let naming = self.naming.is_visible();
+        let req = match vm::title_action(&m, &typed) {
+            TitleAction::Nothing => {
+                self.unfocus();
+                return;
+            }
+            TitleAction::Confirm => Request::ConfirmTitle { id: m.id.clone() },
+            TitleAction::Rename(t) => Request::Rename { id: m.id.clone(), title: t, confirm: true },
+        };
+        self.unfocus();
+        let w = self.clone();
+        glib::spawn_future_local(async move {
+            let result = daemon::request(req.clone()).await;
+            if result.is_err() {
+                // Daemon down: write the name ourselves so the user isn't stuck.
+                let title = match &req {
+                    Request::Rename { title, .. } => title.clone(),
+                    _ => m.display_title(),
+                };
+                let _ = store::set_title(&w.db, &m.id, &title, true);
+            }
+            if naming {
+                w.toast("Saved");
+            }
+            w.reload_list();
+            w.render_meeting(false);
+        });
+    }
+
+    fn skip_naming(self: &Rc<Self>) {
+        let id = self.st.borrow().selected.clone();
+        if let Some(id) = id {
+            self.st.borrow_mut().skipped.insert(id);
+            self.unfocus();
+            self.render_meeting(true);
+        }
+    }
+
+    fn enhance(self: &Rc<Self>) {
+        self.flush_notes();
+        let Some(id) = self.st.borrow().selected.clone() else { return };
+        self.st.borrow_mut().awaiting_enhance = Some((id.clone(), store::now_ms()));
+        self.send(Request::Enhance { id }, Some("Enhancing your notes…"));
+    }
+
+    fn confirm_delete(self: &Rc<Self>) {
+        let Some(m) = self.st.borrow().current.clone() else { return };
+        let dlg = adw::AlertDialog::new(
+            Some("Delete this meeting?"),
+            Some(&format!("“{}” — its notes, transcript and audio are removed from this computer.", m.display_title())),
+        );
+        dlg.add_responses(&[("cancel", "Cancel"), ("delete", "Delete")]);
+        dlg.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+        dlg.set_close_response("cancel");
+        let w = self.clone();
+        dlg.connect_response(None, move |_, resp| {
+            if resp != "delete" {
+                return;
+            }
+            let w = w.clone();
+            let id = m.id.clone();
+            glib::spawn_future_local(async move {
+                match daemon::request(Request::Delete { id }).await {
+                    Ok(_) => {
+                        w.st.borrow_mut().selected = None;
+                        w.reload_list();
+                    }
+                    Err(e) => w.toast(&e),
+                }
+            });
+        });
+        dlg.present(Some(&self.window));
+    }
+
+    fn copy(&self) {
+        let st = self.st.borrow();
+        let Some(m) = st.current.as_ref() else { return };
+        let enhanced = st.notes.as_ref().and_then(|n| n.enhanced.as_ref());
+        let text = vm::copy_text(&m.display_title(), enhanced, &text_of(&self.notes_view));
+        self.window.clipboard().set_text(&text);
+        drop(st);
+        self.toast("Copied to clipboard");
+    }
+
+    // ------------------------------------------------------------------ user notes
+
+    fn on_notes_changed(self: &Rc<Self>, empty: bool) {
+        self.notes_placeholder.set_visible(empty);
+        let g = {
+            let mut st = self.st.borrow_mut();
+            if st.loading {
+                return;
+            }
+            st.notes_dirty = true;
+            st.notes_gen += 1;
+            st.notes_gen
+        };
+        let w = self.clone();
+        glib::timeout_add_local_once(Duration::from_millis(600), move || {
+            if w.st.borrow().notes_gen == g {
+                w.flush_notes();
+            }
+        });
+    }
+
+    fn flush_notes(&self) {
+        let (dirty, id) = {
+            let st = self.st.borrow();
+            (st.notes_dirty, st.notes_for.clone())
+        };
+        if let (true, Some(id)) = (dirty, id) {
+            let md = text_of(&self.notes_view);
+            match store::set_user_notes(&self.db, &id, &md) {
+                Ok(()) => {
+                    let mut st = self.st.borrow_mut();
+                    st.notes_dirty = false;
+                    if let Some(n) = st.notes.as_mut().filter(|n| n.meeting_id == id) {
+                        n.user_md = md;
+                    }
+                }
+                Err(e) => self.toast(&format!("Couldn't save notes: {e}")),
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ ask
+
+    fn render_ask_model(&self) {
+        self.ask_model.set_text(&vm::model_label(&config::Config::load().openrouter.chat_model));
+    }
+
+    fn render_thread(&self, id: &str) {
+        clear(&self.thread);
+        store::chats(&self.db, id).unwrap_or_default().iter().for_each(|c| {
+            self.thread.append(&chat_label(&c.role, &c.content));
+        });
+    }
+
+    fn ask(self: &Rc<Self>) {
+        let q = self.ask_entry.text().trim().to_string();
+        let Some(m) = self.st.borrow().current.clone() else { return };
+        if q.is_empty() {
+            return;
+        }
+        if config::api_key().is_none() {
+            self.toast("Add your OpenRouter API key in Settings first");
+            return;
+        }
+        let cfg = config::Config::load();
+        let segs = store::segments(&self.db, &m.id).unwrap_or_default();
+        let notes = store::get_notes(&self.db, &m.id).ok();
+        let notes_md = notes
+            .as_ref()
+            .and_then(|n| n.enhanced.as_ref().map(EnhancedNotes::to_markdown))
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| notes.as_ref().map(|n| n.user_md.clone()))
+            .unwrap_or_default();
+        let history: Vec<Message> = store::chats(&self.db, &m.id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| match c.role.as_str() {
+                "assistant" => Message::assistant(c.content),
+                _ => Message::user(c.content),
+            })
+            .collect();
+        let msgs = prompts::ask_messages(&q, &transcript::render_for_prompt(&segs), &notes_md, &history);
+        let _ = store::add_chat(&self.db, &m.id, "user", &q);
+        self.ask_entry.set_text("");
+        self.thread.append(&chat_label("user", &q));
+        let pending = para("Thinking…", &["a", "pending"]);
+        self.thread.append(&pending);
+        self.thread_rev.set_reveal_child(true);
+        self.scroll_thread();
+        let w = self.clone();
+        glib::spawn_future_local(async move {
+            let reply = daemon::chat(cfg.openrouter.chat_model.clone(), msgs).await;
+            pending.remove_css_class("pending");
+            pending.set_selectable(true);
+            match reply {
+                Ok(a) => {
+                    let _ = store::add_chat(&w.db, &m.id, "assistant", a.trim());
+                    pending.set_text(a.trim());
+                }
+                Err(e) => pending.set_text(&format!("Couldn't get an answer: {e}")),
+            }
+            w.scroll_thread();
+        });
+    }
+
+    fn scroll_thread(&self) {
+        let adj = self.thread_scroll.vadjustment();
+        glib::idle_add_local_once(move || adj.set_value(adj.upper()));
+    }
+}
+
+fn chat_label(role: &str, content: &str) -> gtk::Label {
+    let l = para(content, if role == "user" { &["q"] } else { &["a"] });
+    l.set_selectable(role != "user");
+    l
+}
+
+fn clear_wrap(b: &adw::WrapBox) {
+    while let Some(c) = b.first_child() {
+        b.remove(&c);
+    }
+}
+
+fn set_button_text(b: &gtk::Button, text: &str) {
+    let label = b.child().and_then(|c| c.last_child()).and_then(|l| l.downcast::<gtk::Label>().ok());
+    if let Some(l) = label {
+        l.set_text(text);
+    }
+}
+

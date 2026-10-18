@@ -1,0 +1,22 @@
+[package]
+name = "muesli-audio"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["aec"]
+aec = ["dep:webrtc-audio-processing", "dep:webrtc-audio-processing-config"]
+# Build WebRTC APM from source (needs meson + ninja). Without it, links system webrtc-audio-processing-2.
+aec-bundled = ["aec", "webrtc-audio-processing/bundled"]
+
+[dependencies]
+muesli-core.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+pipewire = "0.10"
+opusic-sys = { version = "0.7", default-features = false }
+ogg = "0.9"
+webrtc-audio-processing = { version = "2.1", optional = true }
+webrtc-audio-processing-config = { version = "2.1", optional = true }

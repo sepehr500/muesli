@@ -1,0 +1,34 @@
+# Maintainer: Sepehr Sobhani <8966311+sepehr500@users.noreply.github.com>
+pkgname=muesli-git
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Local AI meeting notes for Linux: detects Zoom/Discord calls, records, transcribes and writes notes via OpenRouter"
+arch=('x86_64')
+url="https://github.com/sepehr500/muesli"
+license=('MIT')
+depends=('pipewire' 'gtk4' 'libadwaita' 'opus' 'webrtc-audio-processing' 'libnotify' 'sqlite')
+makedepends=('cargo' 'clang' 'pkgconf' 'git')
+optdepends=('hyprland: window titles for meeting names')
+provides=('muesli')
+source=("git+file://$(realpath ..)")
+sha256sums=('SKIP')
+
+build() {
+  cd muesli
+  cargo build --release --locked -p muesli-daemon -p muesli-cli -p muesli-ui
+}
+
+check() {
+  cd muesli
+  cargo test --release --locked -p muesli-core -p muesli-audio
+}
+
+package() {
+  cd muesli
+  install -Dm755 target/release/muesli-daemon target/release/muesli-cli target/release/muesli -t "$pkgdir/usr/bin/"
+  install -Dm644 packaging/dev.muesli.Muesli.desktop -t "$pkgdir/usr/share/applications/"
+  install -Dm644 packaging/dev.muesli.Muesli.svg -t "$pkgdir/usr/share/icons/hicolor/scalable/apps/"
+  sed 's#%h/.local/bin/#/usr/bin/#' packaging/muesli-daemon.service | install -Dm644 /dev/stdin "$pkgdir/usr/lib/systemd/user/muesli-daemon.service"
+  install -d "$pkgdir/usr/share/muesli"
+  cp -r omarchy-plugin/ssobhani.muesli "$pkgdir/usr/share/muesli/omarchy-plugin"
+}

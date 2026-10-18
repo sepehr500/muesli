@@ -1,0 +1,265 @@
+//! `muesli-cli` — scriptable control of muesli-daemon (also used by the Omarchy plugin).
+
+use anyhow::{Result, bail};
+use clap::{Parser, Subcommand};
+use muesli_core::ipc::{self, Event, Request, SessionView, Status};
+use muesli_core::{config, detect, model, store, transcript};
+
+#[derive(Parser)]
+#[command(name = "muesli-cli", version, about = "Control muesli, the local meeting notes app")]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Current daemon status.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stream status/level events (one JSON object per line with --json).
+    Watch {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Start recording now (manual), or accept a pending prompt.
+    Start,
+    /// Accept the "Record this call?" prompt.
+    Record,
+    /// Decline the prompt for this call.
+    Ignore,
+    /// Stop recording and process it.
+    Stop,
+    /// Stop recording and throw it away.
+    Discard,
+    /// Toggle recording: start if idle/prompting, stop if recording.
+    Toggle,
+    /// Turn auto-record on/off (persists to config.toml).
+    AutoRecord { value: OnOff },
+    /// Name a meeting.
+    Rename {
+        id: String,
+        title: String,
+        /// Keep the naming prompt open.
+        #[arg(long)]
+        no_confirm: bool,
+    },
+    /// Accept the current title.
+    Confirm { id: String },
+    /// Re-run the post-call pipeline.
+    Reprocess { id: String },
+    /// Re-run note enhancement only.
+    Enhance { id: String },
+    /// Delete a meeting and its audio.
+    Delete { id: String },
+    /// List recent meetings (reads the database directly).
+    List {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print a meeting's notes and transcript as markdown.
+    Show { id: String },
+    /// Open the notes app (optionally at a meeting).
+    Open { id: Option<String> },
+    /// Store the OpenRouter API key (~/.config/muesli/openrouter.key, mode 600).
+    SetKey { key: String },
+    /// Debug: what does detection see right now?
+    Detect,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum OnOff {
+    On,
+    Off,
+    Toggle,
+}
+
+fn call(req: Request) -> Result<serde_json::Value> {
+    let r = ipc::request(&req)?;
+    match r.ok {
+        true => Ok(r.data.unwrap_or(serde_json::Value::Null)),
+        false => bail!(r.error.unwrap_or_else(|| "request failed".into())),
+    }
+}
+
+fn status() -> Result<Status> {
+    Ok(serde_json::from_value(call(Request::Status)?)?)
+}
+
+fn clock(ms: i64) -> String {
+    let secs = ((store::now_ms() - ms).max(0) / 1000) as u64;
+    match secs >= 3600 {
+        true => format!("{}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60),
+        false => format!("{:02}:{:02}", secs / 60, secs % 60),
+    }
+}
+
+fn human_status(s: &Status) -> String {
+    let session = match &s.session {
+        SessionView::Idle => "Listening for calls".to_string(),
+        SessionView::Prompting { app, hint, .. } => {
+            format!("Call detected in {} {}— record?", app.label(), hint.as_deref().map(|h| format!("({h}) ")).unwrap_or_default())
+        }
+        SessionView::Recording { app, hint, started_at, .. } => format!(
+            "● Recording {} {}{}",
+            clock(*started_at),
+            app.map(|a| a.label()).unwrap_or("manually"),
+            hint.as_deref().map(|h| format!(" · {h}")).unwrap_or_default()
+        ),
+    };
+    let processing = s.processing.iter().map(|p| {
+        let active = p
+            .pipeline
+            .steps
+            .iter()
+            .find(|st| st.status == model::StepStatus::Active)
+            .map(|st| st.kind.active_label())
+            .unwrap_or("Queued");
+        format!("\n  {} — {active} ({}/4)", p.title, p.pipeline.done_count())
+    });
+    let naming = s.needs_name.iter().map(|n| format!("\n  Name this meeting: {} [{}]", n.title, n.meeting_id));
+    let auto = if s.auto_record { "auto-record on" } else { "auto-record off" };
+    let key = if s.api_key { "" } else { "\n  ⚠ No OpenRouter key — run: muesli-cli set-key <key>" };
+    format!("{session} · {auto}{}{}{key}", processing.collect::<String>(), naming.collect::<String>())
+}
+
+/// Print one event; false if stdout is gone (reader closed the pipe).
+fn print_event(e: &Event, json: bool) -> bool {
+    use std::io::Write;
+    let line = match json {
+        true => serde_json::to_string(e).unwrap_or_default(),
+        false => match e {
+            Event::Status(s) => human_status(s),
+            Event::Levels { me, them } => format!("levels  you {me:.2}  them {them:.2}"),
+            Event::MeetingUpdated { id } => format!("updated {id}"),
+        },
+    };
+    let mut out = std::io::stdout().lock();
+    writeln!(out, "{line}").and_then(|_| out.flush()).is_ok()
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    match cli.cmd {
+        Cmd::Status { json } => {
+            let s = status()?;
+            match json {
+                true => println!("{}", serde_json::to_string(&s)?),
+                false => println!("{}", human_status(&s)),
+            }
+        }
+        Cmd::Watch { json } => {
+            // Reconnect forever so bar widgets survive daemon restarts.
+            loop {
+                let mut alive = true;
+                let res = ipc::watch(|e| {
+                    alive = print_event(&e, json);
+                    alive
+                });
+                if !alive {
+                    return Ok(());
+                }
+                if let Err(e) = res {
+                    use std::io::Write;
+                    let msg = match json {
+                        true => format!(r#"{{"event":"disconnected","data":{{"error":{}}}}}"#, serde_json::to_string(&e.to_string())?),
+                        false => format!("{e}; retrying…"),
+                    };
+                    if writeln!(std::io::stdout().lock(), "{msg}").is_err() {
+                        return Ok(());
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+        }
+        Cmd::Start => drop(call(Request::Start)?),
+        Cmd::Record => drop(call(Request::Record)?),
+        Cmd::Ignore => drop(call(Request::Ignore)?),
+        Cmd::Stop => drop(call(Request::Stop)?),
+        Cmd::Discard => drop(call(Request::Discard)?),
+        Cmd::Toggle => {
+            let req = match status()?.session {
+                SessionView::Recording { .. } => Request::Stop,
+                SessionView::Prompting { .. } => Request::Record,
+                SessionView::Idle => Request::Start,
+            };
+            call(req)?;
+        }
+        Cmd::AutoRecord { value } => {
+            let v = match value {
+                OnOff::On => true,
+                OnOff::Off => false,
+                OnOff::Toggle => !status()?.auto_record,
+            };
+            call(Request::SetAutoRecord { value: v })?;
+            println!("auto-record {}", if v { "on" } else { "off" });
+        }
+        Cmd::Rename { id, title, no_confirm } => {
+            drop(call(Request::Rename { id, title, confirm: !no_confirm })?)
+        }
+        Cmd::Confirm { id } => drop(call(Request::ConfirmTitle { id })?),
+        Cmd::Reprocess { id } => drop(call(Request::Reprocess { id })?),
+        Cmd::Enhance { id } => drop(call(Request::Enhance { id })?),
+        Cmd::Delete { id } => drop(call(Request::Delete { id })?),
+        Cmd::List { limit, json } => {
+            let c = store::open_default()?;
+            let ms = store::list_meetings(&c, limit)?;
+            match json {
+                true => println!("{}", serde_json::to_string(&ms)?),
+                false => ms.iter().for_each(|m| {
+                    let when = chrono::DateTime::from_timestamp_millis(m.started_at)
+                        .map(|t| t.with_timezone(&chrono::Local).format("%a %b %-d %H:%M").to_string())
+                        .unwrap_or_default();
+                    let dur = m.duration_ms().map(model::human_duration).unwrap_or_else(|| "…".into());
+                    println!("{}  {when}  {:<8} {:>9}  {}", m.id, m.app.map(|a| a.label()).unwrap_or("—"), dur, m.display_title());
+                }),
+            }
+        }
+        Cmd::Show { id } => {
+            let c = store::open_default()?;
+            let Some(m) = store::get_meeting(&c, &id)? else { bail!("no meeting {id}") };
+            let notes = store::get_notes(&c, &id)?;
+            let segs = store::segments(&c, &id)?;
+            println!("# {}\n", m.display_title());
+            if let Some(e) = &notes.enhanced {
+                println!("{}\n", e.to_markdown());
+            } else if !notes.user_md.is_empty() {
+                println!("{}\n", notes.user_md);
+            }
+            if !segs.is_empty() {
+                println!("## Transcript\n");
+                segs.iter().for_each(|s| {
+                    let t = s.t_start as u64;
+                    println!("[{:02}:{:02}] {}: {}", t / 60, t % 60, transcript::display_speaker(&s.speaker, &m.speaker_names), s.text)
+                });
+            }
+        }
+        Cmd::Open { id } => {
+            let mut cmd = std::process::Command::new("muesli");
+            if let Some(id) = id {
+                cmd.args(["--meeting", &id]);
+            }
+            cmd.spawn()?;
+        }
+        Cmd::SetKey { key } => {
+            config::save_api_key(&key)?;
+            let _ = ipc::request(&Request::ReloadConfig);
+            println!("saved to {}", muesli_core::paths::key_file().display());
+        }
+        Cmd::Detect => {
+            let dump = std::process::Command::new("pw-dump").output()?.stdout;
+            let clients = std::process::Command::new("hyprctl").args(["clients", "-j"]).output()?.stdout;
+            let nodes = detect::nodes_from_pw_dump(&serde_json::from_slice(&dump)?);
+            let windows = detect::windows_from_hyprctl(&serde_json::from_slice(&clients).unwrap_or_default());
+            nodes.iter().filter(|n| n.media_class.starts_with("Stream/Input")).for_each(|n| {
+                println!("mic stream {:>4}  {:?} ({:?}) corked={}", n.id, n.app_name, n.binary, n.corked)
+            });
+            println!("→ {:?}", detect::classify(&nodes, &windows));
+        }
+    }
+    Ok(())
+}

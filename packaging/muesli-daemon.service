@@ -1,0 +1,16 @@
+[Unit]
+Description=muesli — local meeting notes (call detection + recording)
+After=pipewire.service pipewire-pulse.service
+Wants=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/muesli-daemon
+Restart=on-failure
+RestartSec=3
+# Recording finalization on stop.
+TimeoutStopSec=10
+Environment=RUST_LOG=muesli_daemon=info,muesli_core=info,muesli_audio=info
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,27 @@
+[package]
+name = "muesli-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "muesli"
+path = "src/main.rs"
+
+[dependencies]
+muesli-core.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+async-channel = "2"
+gtk = { package = "gtk4", version = "0.11", features = ["v4_22"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_9"] }
+
+[[example]]
+name = "seed"
+path = "examples/seed.rs"

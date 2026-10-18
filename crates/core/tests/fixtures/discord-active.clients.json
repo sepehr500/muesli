@@ -1,0 +1,17 @@
+[
+ {
+  "class": "kitty",
+  "title": "Terminal",
+  "pid": 1001
+ },
+ {
+  "class": "google-chrome",
+  "title": "Example page - Google Chrome",
+  "pid": 1200
+ },
+ {
+  "class": "chrome-discord.com__channels_@me-Default",
+  "title": "(3) Discord | #general | Example server",
+  "pid": 1200
+ }
+]

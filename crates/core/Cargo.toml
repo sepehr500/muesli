@@ -1,0 +1,23 @@
+[package]
+name = "muesli-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+rusqlite.workspace = true
+chrono.workspace = true
+directories.workspace = true
+reqwest.workspace = true
+tracing.workspace = true
+base64.workspace = true
+strsim.workspace = true
+ulid.workspace = true
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+tokio = { workspace = true }

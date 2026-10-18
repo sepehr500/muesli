@@ -1,0 +1,18 @@
+/* "Alpenglow at dusk": deep slate-blue ground, snow ink, gentian lightened and warmed a touch. */
+:root {
+  --snow: #161D2C;
+  --glacier: #1C2436;
+  --hairline: #2B354B;
+  --granite: #EEF2F7;
+  --slate: #9DA9BB;
+  --gentian: #93A9F2;
+  --gentian-soft: #26325A;
+  --gentian-ink: #121A2E;
+  --gentian-sub: #2E3F72;
+  --chip-line: #36415A;
+  --chip-dash: #45506B;
+  --swiss-red: #FF5A4E;
+  --hover: rgba(238, 242, 247, 0.05);
+  --shadow: rgba(0, 0, 0, 0.28);
+  --shadow-strong: rgba(0, 0, 0, 0.35);
+}

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Muesli
+GenericName=Meeting notes
+Comment=Local AI meeting notes for Zoom and Discord
+Exec=muesli %U
+Icon=dev.muesli.Muesli
+Terminal=false
+Categories=Office;AudioVideo;
+Keywords=notes;meeting;transcript;zoom;discord;
+StartupWMClass=dev.muesli.Muesli
