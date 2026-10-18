@@ -27,7 +27,7 @@ Target system: Arch/Omarchy, Wayland (Hyprland), PipeWire, Quickshell-based `oma
 | Language | Rust |
 | LLM + STT provider | OpenRouter (one API key) |
 | Transcription | **After the meeting**, no live transcript |
-| Default STT model | `fish-audio/transcribe-1-pro` (meeting-tuned, inline speaker labels, $0.006/min). Fallbacks: `elevenlabs/scribe-v2` → `openai/whisper-large-v3-turbo` |
+| Default STT model | `elevenlabs/scribe-v2` with `diarize` on and audio-event tags off ($0.0018/min at the current 50% discount). Fallbacks: `assemblyai/universal-3-6-pro` → `fish-audio/transcribe-1-pro`. Chosen by a 7-model bake-off on a real Discord call (Oct 18): best accuracy, per-word speaker labels, cheapest. |
 | Audio | **Always recorded to disk**, crash-safe, two channels (Me / Them) |
 | Echo | Must handle it, because you use speakers. Run WebRTC AEC offline on the saved audio |
 | Auto-record | Setting `auto_record = true/false` (details below) |
@@ -131,7 +131,7 @@ There's an optional per-app override in config (`[apps.discord] auto_record = fa
 2. **AEC** on mic, using sys as the far-end reference, with `webrtc-audio-processing` 2.x (it links the system `webrtc-audio-processing-1`, already installed with PipeWire). Out comes `mic_clean`.
 3. **VAD trim** on `mic_clean` and on sys. Speech-only spans are kept with a **time map**, so trimmed time maps back to meeting time.
 4. **Split** each channel's speech into requests of about 10 min (or below the size limit), cutting only in pauses.
-5. **STT** with a fallback chain: `fish-audio/transcribe-1-pro` → `elevenlabs/scribe-v2` → `openai/whisper-large-v3-turbo`. A timeout or 5xx retries once, then falls back to the next model. The model used is recorded for each piece.
+5. **STT** with a fallback chain: `elevenlabs/scribe-v2` → `assemblyai/universal-3-6-pro` → `fish-audio/transcribe-1-pro`. Speaker diarization is enabled per provider via `provider.options`; word timings and labels are grouped into turns. A timeout or 5xx retries once, then falls back to the next model. The model used is recorded for each piece.
 6. **Normalise and merge:**
    - Mic text is always speaker = **Me**.
    - Sys text uses the model's speaker labels as **Them A/B/C**.
@@ -150,7 +150,7 @@ The cost for an hour-long call with silence trimmed is roughly $0.20–0.40.
 ```toml
 [openrouter]
 base_url      = "https://openrouter.ai/api/v1"
-stt_models    = ["fish-audio/transcribe-1-pro", "elevenlabs/scribe-v2", "openai/whisper-large-v3-turbo"]
+stt_models    = ["elevenlabs/scribe-v2", "assemblyai/universal-3-6-pro", "fish-audio/transcribe-1-pro"]
 chat_model    = "google/gemini-2.5-flash"      # titles, speaker linking, Q&A
 enhance_model = "anthropic/claude-sonnet-4.5"  # note enhancement
 zdr           = true                           # zero-data-retention routing only

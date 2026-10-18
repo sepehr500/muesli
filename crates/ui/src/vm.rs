@@ -363,7 +363,7 @@ pub fn transcript_rows(segs: &[Segment], names: &BTreeMap<String, String>) -> Ve
     })
 }
 
-/// "fish-audio/transcribe-1-pro, elevenlabs/scribe-v2" ⇄ list.
+/// "elevenlabs/scribe-v2, assemblyai/universal-3-6-pro" ⇄ list.
 pub fn parse_list(s: &str) -> Vec<String> {
     s.split(',').map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect()
 }

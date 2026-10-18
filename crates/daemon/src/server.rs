@@ -3,7 +3,7 @@
 use crate::ctx::{Ctx, SessionCmd};
 use anyhow::Result;
 use muesli_core::ipc::{Event, Request, Response, SessionView};
-use muesli_core::model::fallback_title;
+use muesli_core::model::{StepKind, StepStatus, fallback_title};
 use muesli_core::{config, paths, session, store};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -109,7 +109,12 @@ async fn handle(ctx: &Arc<Ctx>, req: Request) -> Result<Response> {
             Ok(Response::empty())
         }
         Request::Reprocess { id } => {
-            ctx.meeting(&id)?;
+            // Keep the recording and cleaned audio; redo transcription and notes.
+            let mut m = ctx.meeting(&id)?;
+            m.pipeline = [StepKind::Transcribed, StepKind::Notes]
+                .into_iter()
+                .fold(std::mem::take(&mut m.pipeline), |p, k| p.with(k, StepStatus::Pending, None));
+            ctx.save(&m)?;
             tokio::spawn(crate::pipeline::run(ctx.clone(), id, false));
             Ok(Response::empty())
         }

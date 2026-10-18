@@ -74,7 +74,8 @@ pub fn enhance_messages(
         true => String::new(),
         false => format!(
             "\nOther-speaker labels in the transcript: {}. Infer real names from context \
-             (people addressing each other, introductions). Map every label you can.",
+             (people addressing each other, introductions). In \"speakers\", include only labels whose real \
+             name you are confident of; leave the others out.",
             speaker_labels.join(", ")
         ),
     };
@@ -90,6 +91,8 @@ pub fn enhance_messages(
              - Add important points they missed with from_user=false. Be concise; no filler, no preamble.\n\
              - Action items: concrete, start with a verb, owner = a person's name or \"You\".\n\
              - Never invent facts not supported by the transcript.\n\
+             - Never write the bracketed labels (like c0s1) in notes or owners. Use a person's real name when \
+               the transcript makes it clear, otherwise a neutral phrase such as \"a participant\".\n\
              {template}{labels}\n\
              Reply with JSON only, exactly this shape:\n\
              {{\"sections\":[{{\"title\":\"Decisions\",\"items\":[{{\"text\":\"...\",\"from_user\":true,\"detail\":\"...\"}}]}}],\
@@ -112,18 +115,92 @@ struct EnhanceReply {
     speakers: BTreeMap<String, String>,
 }
 
+/// Reject placeholders the model sometimes returns instead of a name.
+fn is_real_name(v: &str) -> bool {
+    let l = v.trim().to_ascii_lowercase();
+    let generic = ["speaker", "unknown", "participant", "someone", "person", "user", "other", "guest", "friend"];
+    !l.is_empty() && l != "you" && !generic.iter().any(|g| l.contains(g))
+}
+
 pub fn parse_enhanced(s: &str) -> Option<(EnhancedNotes, BTreeMap<String, String>)> {
     let r: EnhanceReply = serde_json::from_str(extract_json(s)?).ok()?;
     let speakers = r
         .speakers
         .into_iter()
         .map(|(k, v)| (k.trim_matches(['[', ']']).to_string(), v.trim().to_string()))
-        .filter(|(_, v)| {
-            let l = v.to_ascii_lowercase();
-            !l.is_empty() && !l.starts_with("speaker") && !l.contains("unknown") && l != "you" && !l.starts_with("participant")
-        })
+        .filter(|(_, v)| is_real_name(v))
         .collect();
     Some((r.notes, speakers))
+}
+
+/// Replace any raw speaker labels (`c0s1`, `[c0s1]`) that slipped into note text with the
+/// linked name, or the same "Speaker N" the transcript shows.
+pub fn scrub_labels(notes: EnhancedNotes, names: &BTreeMap<String, String>) -> EnhancedNotes {
+    let fix = |t: String| scrub_text(&t, names);
+    EnhancedNotes {
+        sections: notes
+            .sections
+            .into_iter()
+            .map(|s| crate::model::NoteSection {
+                items: s
+                    .items
+                    .into_iter()
+                    .map(|i| crate::model::NoteItem { text: fix(i.text), detail: i.detail.map(fix), ..i })
+                    .collect(),
+                ..s
+            })
+            .collect(),
+        action_items: notes
+            .action_items
+            .into_iter()
+            .map(|a| crate::model::ActionItem { text: fix(a.text), owner: a.owner.map(fix), ..a })
+            .collect(),
+    }
+}
+
+/// Is `w` a raw chunk speaker label like `c12s3`?
+fn is_label(w: &str) -> bool {
+    let rest = match w.strip_prefix('c') {
+        Some(r) => r,
+        None => return false,
+    };
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    let tail = &rest[digits..];
+    digits > 0
+        && tail.strip_prefix('s').is_some_and(|id| (1..=3).contains(&id.len()) && id.chars().all(|c| c.is_ascii_alphanumeric()))
+}
+
+fn scrub_text(text: &str, names: &BTreeMap<String, String>) -> String {
+    let name = |l: &str| crate::transcript::display_speaker(&crate::model::Speaker::Them(l.to_string()), names);
+    // Walk word-ish tokens, keeping all separators intact.
+    let mut out = String::with_capacity(text.len());
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        match is_label(word) {
+            true => {
+                if out.ends_with('[') {
+                    out.pop();
+                }
+                out.push_str(&name(word));
+            }
+            false => out.push_str(word),
+        }
+        word.clear();
+    };
+    for c in text.chars() {
+        match c.is_ascii_alphanumeric() {
+            true => word.push(c),
+            false => {
+                let was_label = is_label(&word);
+                flush(&mut word, &mut out);
+                if !(was_label && c == ']') {
+                    out.push(c);
+                }
+            }
+        }
+    }
+    flush(&mut word, &mut out);
+    out
 }
 
 pub fn ask_messages(question: &str, transcript: &str, notes_md: &str, history: &[Message]) -> Vec<Message> {
@@ -159,6 +236,15 @@ mod tests {
         assert_eq!(n.action_items[0].owner.as_deref(), Some("You"));
         assert_eq!(s.len(), 1);
         assert_eq!(s["c0s1"], "Lena");
+    }
+
+    #[test]
+    fn scrubs_raw_labels() {
+        let names: BTreeMap<String, String> = [("c1s2".to_string(), "Barry".to_string())].into();
+        assert_eq!(scrub_text("c1s0 wakes up early", &names), "Speaker 1 wakes up early");
+        assert_eq!(scrub_text("Ask [c1s2] about it.", &names), "Ask Barry about it.");
+        assert_eq!(scrub_text("disc1s0 and c3po", &names), "disc1s0 and c3po");
+        assert!(!is_real_name("a participant") && !is_real_name("Unknown speaker") && is_real_name("Barry"));
     }
 
     #[test]

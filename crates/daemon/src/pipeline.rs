@@ -209,6 +209,7 @@ async fn steps(ctx: &Arc<Ctx>, id: &str, enhance_only: bool) -> Result<()> {
             m.cost_usd += r.cost;
             let (enhanced, speakers) = prompts::parse_enhanced(&r.content)
                 .ok_or_else(|| anyhow!("the notes model returned something unreadable"))?;
+            let enhanced = prompts::scrub_labels(enhanced, &speakers);
             ctx.db(|c| store::set_enhanced(c, id, Some(&enhanced)))?;
             m.speaker_names = speakers;
             // Refresh the transcript detail with linked names.

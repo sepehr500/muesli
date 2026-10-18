@@ -40,7 +40,7 @@ Hyprland keybind example: `bind = SUPER SHIFT, M, exec, muesli-cli toggle`
 
 ```toml
 [openrouter]
-stt_models    = ["fish-audio/transcribe-1-pro", "elevenlabs/scribe-v2", "openai/whisper-large-v3-turbo"]
+stt_models    = ["elevenlabs/scribe-v2", "assemblyai/universal-3-6-pro", "fish-audio/transcribe-1-pro"]
 chat_model    = "google/gemini-2.5-flash"     # titles, Q&A
 enhance_model = "anthropic/claude-sonnet-4.5" # notes
 zdr           = false                         # true: zero-data-retention providers only

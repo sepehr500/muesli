@@ -66,6 +66,70 @@ pub struct RawWord {
     pub word: String,
     pub start: f64,
     pub end: f64,
+    /// Diarization label, when the provider returns one (e.g. ElevenLabs with `diarize`).
+    #[serde(default)]
+    pub speaker: Option<serde_json::Value>,
+}
+
+/// A pause this long ends a turn at a sentence end (meeting time, so trimmed silence counts)…
+const TURN_PAUSE_S: f64 = 1.2;
+/// …and a pause this long ends it anywhere.
+const TURN_GAP_S: f64 = 3.0;
+/// Long monologues are split at the next sentence end past this length.
+const TURN_MAX_S: f64 = 25.0;
+
+/// Remove non-speech tags: `[clears throat]`, `[pause]`, `<|speaker:0|>`; collapse whitespace.
+pub fn strip_tags(text: &str) -> String {
+    let (out, _) = text.chars().fold((String::new(), 0u32), |(mut out, depth), c| match c {
+        '[' => (out, depth + 1),
+        ']' if depth > 0 => (out, depth - 1),
+        _ if depth > 0 => (out, depth),
+        c => {
+            out.push(c);
+            (out, depth)
+        }
+    });
+    let out = strip_between(&out, "<|", "|>");
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn strip_between(s: &str, open: &str, close: &str) -> String {
+    match s.find(open) {
+        None => s.to_string(),
+        Some(a) => match s[a..].find(close) {
+            None => s.to_string(),
+            Some(b) => format!("{}{}", &s[..a], strip_between(&s[a + b + close.len()..], open, close)),
+        },
+    }
+}
+
+/// Group timed words into turns (meeting time): a new turn starts on a speaker change, a long
+/// gap, a pause after a sentence end, or the first sentence end once a turn runs past `TURN_MAX_S`.
+pub fn turns_from_words(words: &[RawWord], map: &TimeMap) -> Vec<(Option<String>, f64, f64, String)> {
+    let sentence_end = |w: &str| w.trim_end_matches(['"', '\'', ')']).ends_with(['.', '?', '!']);
+    words
+        .iter()
+        .filter(|w| !w.word.trim().is_empty())
+        .map(|w| (w.speaker.as_ref().and_then(speaker_label), map.to_src(w.start), map.to_src(w.end.max(w.start)), w.word.trim()))
+        .fold(Vec::<(Option<String>, f64, f64, String)>::new(), |mut turns, (who, a, b, word)| {
+            let split = match turns.last() {
+                None => true,
+                Some((prev, t0, t1, text)) => {
+                    let last = text.rsplit(' ').next().unwrap_or("");
+                    let (gap, ends) = (a - t1, sentence_end(last));
+                    *prev != who || gap > TURN_GAP_S || (ends && (gap > TURN_PAUSE_S || t1 - t0 > TURN_MAX_S))
+                }
+            };
+            match (split, turns.last_mut()) {
+                (false, Some(t)) => {
+                    t.2 = b;
+                    t.3.push(' ');
+                    t.3.push_str(word);
+                }
+                _ => turns.push((who, a, b, word.to_string())),
+            }
+            turns
+        })
 }
 
 /// Split inline speaker markers some models emit, e.g.
@@ -140,6 +204,24 @@ pub fn segments_from_stt(
         true => Speaker::Me,
         false => Speaker::Them(format!("c{chunk}s{}", label.unwrap_or_else(|| "0".into()))),
     };
+    let clean = |segs: Vec<Segment>| -> Vec<Segment> {
+        segs.into_iter()
+            .map(|s| Segment { text: strip_tags(&s.text), ..s })
+            .filter(|s| s.text.chars().any(char::is_alphanumeric))
+            .collect()
+    };
+    // Word timings give real turns. Use them unless speakers only exist as inline markers
+    // (fish-audio), which word lists don't carry.
+    let word_speakers = words.iter().any(|w| w.speaker.as_ref().and_then(speaker_label).is_some());
+    let has_markers = |t: &str| split_inline_speakers(t).iter().any(|(l, _)| l.is_some());
+    let inline_speakers = has_markers(text) || raw.iter().any(|r| has_markers(&r.text));
+    if !words.is_empty() && (me || word_speakers || !inline_speakers) {
+        let segs = turns_from_words(words, map)
+            .into_iter()
+            .map(|(label, a, b, t)| Segment { speaker: who(label), t_start: a, t_end: b, text: t })
+            .collect();
+        return clean(segs);
+    }
     // Global word cursor: lets multi-turn segments be timed by their words.
     let mut cursor = 0usize;
     let mut word_time = |n_words: usize, fallback: (f64, f64)| -> (f64, f64) {
@@ -168,14 +250,14 @@ pub fn segments_from_stt(
         }
     }
     if !segs.is_empty() {
-        return segs;
+        return clean(segs);
     }
     // No timestamps: spread inline turns evenly over the chunk.
     let turns = split_inline_speakers(text);
     let turns: Vec<_> = turns.into_iter().filter(|(_, t)| !t.is_empty()).collect();
     let n = turns.len().max(1) as f64;
     let total = map.total();
-    turns
+    let segs = turns
         .into_iter()
         .enumerate()
         .map(|(k, (label, t))| Segment {
@@ -184,7 +266,8 @@ pub fn segments_from_stt(
             t_end: map.to_src(total * (k as f64 + 1.0) / n),
             text: t,
         })
-        .collect()
+        .collect();
+    clean(segs)
 }
 
 fn normalize(s: &str) -> String {
@@ -271,6 +354,62 @@ mod tests {
         Segment { speaker: sp, t_start: a, t_end: b, text: t.into() }
     }
 
+    fn w(word: &str, start: f64, end: f64, spk: Option<u32>) -> RawWord {
+        RawWord { word: word.into(), start, end, speaker: spk.map(|n| serde_json::json!(n)) }
+    }
+
+    #[test]
+    fn strips_sound_tags() {
+        assert_eq!(strip_tags("[clear throat] For what purposes? [click noise]"), "For what purposes?");
+        assert_eq!(strip_tags("<|speaker:0|> Yo, [pause] hello"), "Yo, hello");
+        assert_eq!(strip_tags("[the other man is saying \"Yeah.\" simultaneously]"), "");
+    }
+
+    #[test]
+    fn word_turns_split_on_speaker_and_pause() {
+        // Trimmed audio: 0-4 s maps to 0-4 s, 4-8 s maps to 10-14 s (6 s of silence removed).
+        let map = TimeMap::from_kept(&[(0.0, 4.0), (10.0, 14.0)]);
+        let words = [
+            w("Yo,", 0.3, 0.4, Some(0)),
+            w("hello.", 0.5, 0.7, Some(0)),
+            w("You", 2.6, 2.7, Some(1)),
+            w("up?", 2.8, 3.0, Some(1)),
+            w("Same", 3.1, 3.3, Some(1)),
+            w("guy.", 4.2, 4.4, Some(1)), // after the trimmed gap: 6 s pause in meeting time
+            w("And", 5.7, 5.8, Some(1)),  // 1.3 s pause after a sentence end
+            w("then,", 5.9, 6.0, Some(1)),
+            w("more.", 7.5, 7.6, Some(1)), // 1.5 s pause mid-sentence: same turn
+        ];
+        let turns = turns_from_words(&words, &map);
+        let texts: Vec<_> = turns.iter().map(|t| (t.0.as_deref(), t.3.as_str())).collect();
+        assert_eq!(
+            texts,
+            [(Some("0"), "Yo, hello."), (Some("1"), "You up? Same"), (Some("1"), "guy."), (Some("1"), "And then, more.")]
+        );
+        assert!((turns[2].1 - 10.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn long_monologue_splits_at_sentence_end() {
+        let map = TimeMap::from_kept(&[(0.0, 100.0)]);
+        let words: Vec<RawWord> = (0..60)
+            .map(|i| w(if i % 10 == 9 { "end." } else { "word" }, i as f64, i as f64 + 0.5, None))
+            .collect();
+        let turns = turns_from_words(&words, &map);
+        assert!(turns.len() >= 2);
+        assert!(turns.iter().all(|t| t.2 - t.1 <= TURN_MAX_S + 10.0));
+        assert!(turns[..turns.len() - 1].iter().all(|t| t.3.ends_with("end.")));
+    }
+
+    #[test]
+    fn diarized_words_become_them_turns() {
+        let map = TimeMap::from_kept(&[(0.0, 10.0)]);
+        let words = [w("Hi", 0.0, 0.2, Some(0)), w("there.", 0.3, 0.5, Some(0)), w("Barry!", 0.7, 1.0, Some(2))];
+        let segs = segments_from_stt("Hi there. Barry!", &[], &words, &map, false, 1);
+        let who: Vec<_> = segs.iter().map(|s| (s.speaker.clone(), s.text.as_str())).collect();
+        assert_eq!(who, [(Speaker::Them("c1s0".into()), "Hi there."), (Speaker::Them("c1s2".into()), "Barry!")]);
+    }
+
     #[test]
     fn timemap_maps_back() {
         let m = TimeMap::from_kept(&[(10.0, 5.0), (30.0, 5.0)]);
@@ -318,7 +457,7 @@ mod tests {
             text: "<|speaker:0|> hi there <|speaker:1|> hello you two".into(),
             speaker: None,
         }];
-        let w = |word: &str, start: f64| RawWord { word: word.into(), start, end: start + 0.5 };
+        let w = |word: &str, start: f64| RawWord { word: word.into(), start, end: start + 0.5, speaker: None };
         let words = vec![w("hi", 0.0), w("there", 0.5), w("hello", 3.0), w("you", 3.5), w("two", 4.0)];
         let s = segments_from_stt("", &raw, &words, &map, false, 1);
         assert_eq!(s[0], seg(Speaker::Them("c1s0".into()), 100.0, 101.0, "hi there"));

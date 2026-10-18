@@ -48,6 +48,16 @@ pub struct SttReply {
     pub cost: f64,
 }
 
+/// Provider-specific STT options (sent under `provider.options`): turn on speaker
+/// diarization and turn off sound-event tags where the provider supports it.
+pub fn stt_provider_options(model: &str) -> Option<serde_json::Value> {
+    match model.split('/').next()? {
+        "elevenlabs" => Some(json!({ "elevenlabs": { "diarize": true, "tag_audio_events": false } })),
+        "assemblyai" => Some(json!({ "assemblyai": { "speaker_labels": true } })),
+        _ => None,
+    }
+}
+
 /// Errors worth trying the next STT model for.
 #[derive(Debug, thiserror::Error)]
 pub enum SttError {
@@ -119,7 +129,10 @@ impl Client {
             body["language"] = json!(l);
         }
         if self.zdr {
-            body["provider"] = json!({ "zdr": true });
+            body["provider"]["zdr"] = json!(true);
+        }
+        if let Some(opts) = stt_provider_options(model) {
+            body["provider"]["options"] = opts;
         }
         let resp = self
             .post("/audio/transcriptions")

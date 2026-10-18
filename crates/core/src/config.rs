@@ -69,9 +69,9 @@ impl Default for OpenRouter {
         OpenRouter {
             base_url: "https://openrouter.ai/api/v1".into(),
             stt_models: vec![
-                "fish-audio/transcribe-1-pro".into(),
                 "elevenlabs/scribe-v2".into(),
-                "openai/whisper-large-v3-turbo".into(),
+                "assemblyai/universal-3-6-pro".into(),
+                "fish-audio/transcribe-1-pro".into(),
             ],
             chat_model: "google/gemini-2.5-flash".into(),
             enhance_model: "anthropic/claude-sonnet-4.5".into(),
@@ -170,7 +170,7 @@ mod tests {
         let c: Config = toml::from_str("[recording]\nauto_record = false\n[apps.discord]\nauto_record = true").unwrap();
         assert!(!c.recording.auto_record);
         assert_eq!(c.recording.end_grace_s, 20);
-        assert_eq!(c.openrouter.stt_models[0], "fish-audio/transcribe-1-pro");
+        assert_eq!(c.openrouter.stt_models[0], "elevenlabs/scribe-v2");
         let p = c.policy();
         assert!(p.auto_for(App::Discord));
         assert!(!p.auto_for(App::Zoom));
