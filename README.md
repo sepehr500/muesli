@@ -1,92 +1,189 @@
 # muesli
 
-Local AI meeting notes for Linux. muesli notices when you're in a **Zoom** or **Discord**
-call (native app or web app), records your mic and the call audio to disk, and when the call
-ends it removes speaker echo, trims silence, transcribes via **OpenRouter**, and writes
-notes around your own bullets. It never joins the call as a bot.
+**Local AI meeting notes for Linux.** muesli notices when you join a Zoom or Discord call,
+records it, and when you hang up hands you a clean set of notes: decisions, action items,
+a speaker-labelled transcript, and a suggested title. No bot joins your call, and everything
+except transcription and note writing happens on your machine.
 
-Built for Omarchy / Hyprland / PipeWire. Rust, GTK4 + libadwaita, an Omarchy bar plugin.
+Think Granola, but native to Linux, open source, and light enough to forget it's running.
 
-## Install
+![muesli: notes and transcript for a meeting](docs/screenshots/notes-and-transcript.png)
 
-```bash
-./install.sh                     # builds release binaries into ~/.local/bin, enables the user service
-muesli-cli set-key               # prompts without echo; or export OPENROUTER_API_KEY
-```
+## Features
 
-Then add the bar widget: `{ "id": "ssobhani.muesli" }` in `bar.layout.right` of
-`~/.config/omarchy/shell.json` (install.sh links the plugin).
+- **Automatic call detection.** Zoom and Discord, as native apps or in the browser.
+  Detection is event-driven (PipeWire tells muesli when an app opens your mic), so idle
+  costs nothing.
+- **Record automatically or ask first.** One setting: either recording starts and you can
+  stop or discard it, or muesli asks and waits for you. Per-app overrides included.
+- **Works on speakers, not just headphones.** Your mic and the call audio are recorded
+  separately, and WebRTC echo cancellation removes the call from your mic afterwards
+  (about −26 dB on a real call), so the other side doesn't show up twice.
+- **Your notes, filled in.** Jot bullets during the call; afterwards muesli keeps them as
+  written and fills in context, decisions and to-dos from the transcript.
+- **Name it after the call.** Title suggestions from what was actually said, plus a
+  plain fallback ("Zoom call · Oct 17, 13:25").
+- **Speaker-labelled transcript.** "You" comes from your mic; other people are separated by
+  the transcription model and named when the conversation makes it clear. Rename or merge
+  speakers with a click, and copy the transcript as plain text.
+- **Ask about a meeting.** Questions answered from that meeting's notes and transcript,
+  with a model picker (Claude, GPT, Gemini, Grok, DeepSeek, or any OpenRouter model).
+- **Omarchy bar widget.** Recording timer, Record / Ignore and Stop / Discard, and naming,
+  right from the bar.
+- **Lightweight.** A Rust background service that idles at about 11 MB of memory and 0% CPU;
+  a native GTK4 / libadwaita app; no Electron, no webview.
 
-Echo cancellation links the system `webrtc-audio-processing` (≥ 2.1, `pacman -S webrtc-audio-processing`).
-Without it, `install.sh` builds WebRTC from source (`--features aec-bundled`, needs meson + ninja).
+## Screenshots
 
-## Use
+| Name it after the call | Dark mode |
+|---|---|
+| ![Naming a meeting after the call, with suggested titles and processing steps](docs/screenshots/name-this-meeting.png) | ![The notes app in dark mode](docs/screenshots/dark-mode.png) |
 
-Join a call. After ~5 s muesli starts recording (or asks, if auto-record is off). A
-notification and the bar widget show the timer; **Stop** / **Discard** are one click away.
-Hang up (or Stop) and in a minute or so you get a title suggestion and notes.
+The Omarchy bar widget asking to record, recording, and naming a finished call (it uses
+your current Omarchy theme):
 
-```text
-muesli-cli status | watch [--json] | toggle | start | stop | discard | record | ignore
-muesli-cli auto-record on|off|toggle
-muesli-cli list | show <id> | rename <id> "Title" | reprocess <id> | enhance <id> | delete <id>
-muesli-cli open [<id>]           # the notes app
-muesli-cli detect                # debug: what the call detector sees right now
-```
+![Omarchy bar panels: call detected, recording, notes ready](docs/screenshots/omarchy-bar-panels.png)
 
-Hyprland keybind example: `bind = SUPER SHIFT, M, exec, muesli-cli toggle`
-
-## Config — `~/.config/muesli/config.toml`
-
-```toml
-[openrouter]
-stt_models    = ["elevenlabs/scribe-v2", "assemblyai/universal-3-6-pro", "fish-audio/transcribe-1-pro"]
-chat_model    = "anthropic/claude-sonnet-5.5"     # titles, Q&A
-enhance_model = "anthropic/claude-sonnet-5.5" # notes
-zdr           = false                         # true: zero-data-retention providers only
-
-[recording]
-auto_record          = true   # false: ask before recording
-start_debounce_s     = 5
-end_grace_s          = 20
-audio_retention_days = 0      # 0 = keep audio forever
-echo_cancellation    = true
-
-[apps.discord]
-auto_record = false           # per-app override
-```
-
-Custom note template: `~/.config/muesli/templates/default.md`.
+<p align="center"><img src="docs/screenshots/model-picker.png" width="300" alt="Model picker for questions and titles"></p>
 
 ## How it works
 
 ```
-PipeWire registry ──► detector ──► session FSM ──► recorder (mic + sink monitor → Ogg Opus, 5-min segments)
-     (events)          classify()    auto / ask        │ stop
-                                                       ▼
-         clean: WebRTC AEC (mic vs speakers) → VAD → speech-only chunks + time maps
-                                                       ▼
-     OpenRouter STT (fallback chain) → echo backstop → merge → titles → enhanced notes → SQLite
+PipeWire events ──► detector ──► record / ask ──► recorder: your mic + call audio → Ogg Opus on disk
+                                                        │ hang up
+                                                        ▼
+            clean: echo cancellation (mic vs. speakers) → trim silence → speech-only chunks
+                                                        ▼
+   OpenRouter speech-to-text (speaker labels) → merged transcript → title suggestions → notes → SQLite
 ```
 
-- **Detection** is event-driven: a live (uncorked) mic stream from a native Zoom/Discord client,
-  or from a browser while a Zoom/Discord window exists (Discord/Zoom web apps).
-- **Two channels**: your mic is "You"; the default sink's monitor is everyone else. Speaker
-  labels within the call channel come from the STT model and are linked to names by the LLM.
-- **Echo**: on speakers, the mic hears the call. The recorded speaker signal is the exact
-  reference, so WebRTC's echo canceller removes it offline (measured −26 dB on a real call).
-  A text-level backstop drops any "You" line that duplicates the other side.
-- **Data** lives in `~/.local/share/muesli/` (`muesli.db` + `meetings/<id>/raw/*.opus`).
+- **Detection:** a live microphone stream from Zoom or Discord, or from a browser while a
+  Zoom or Discord window is open. A call counts as started after about 5 s (mic tests don't
+  trigger it) and as ended about 20 s after the mic closes.
+- **Two channels:** your microphone is "You"; the monitor of your default output is everyone
+  else. That separates you from the call without any guesswork.
+- **After the call:** echo removal and silence trimming run locally. Speech-only audio is sent
+  to OpenRouter for transcription (ElevenLabs Scribe v2 by default, with fallbacks), then a
+  chat model (Claude Sonnet 5.5 by default) writes the title suggestions and notes.
+- **Crash-safe:** audio is written in 5-minute Opus segments that stay readable even if the
+  machine dies mid-call; processing resumes on restart.
 
-## Layout
+## Requirements
 
-| crate | what |
+- Linux with **PipeWire** (default on most current distros).
+- **GTK 4.22+ and libadwaita 1.9+** for the notes app (current Arch / Omarchy).
+- An **OpenRouter API key** ([openrouter.ai](https://openrouter.ai)).
+- A notification daemon that supports action buttons (Omarchy, GNOME, KDE, mako and dunst do).
+- **Hyprland** for detecting calls in the browser (it reads window titles). Native Zoom and
+  Discord apps are detected on any desktop.
+- Rust (stable) to build. Echo cancellation links the system `webrtc-audio-processing` ≥ 2.1
+  if present, otherwise builds it from source (needs `meson` and `ninja`).
+
+Developed and tested on [Omarchy](https://omarchy.org) (Arch + Hyprland). Other distros and
+desktops should mostly work, minus browser-call detection outside Hyprland.
+
+## Install
+
+```bash
+git clone https://github.com/sepehr500/muesli && cd muesli
+./install.sh          # builds release binaries into ~/.local/bin and enables the user service
+muesli-cli set-key    # paste your OpenRouter key (hidden input)
+```
+
+Optional, on Arch: `sudo pacman -S webrtc-audio-processing inter-font` for faster builds and
+the intended typeface. An AUR-style `packaging/PKGBUILD` is included for `makepkg`.
+
+**Omarchy bar widget:** `install.sh` links the plugin. Add it to `bar.layout.right` in
+`~/.config/omarchy/shell.json`:
+
+```json
+{ "id": "ssobhani.muesli" }
+```
+
+## Use
+
+Join a call. A notification and the bar widget show that muesli is recording (or asking,
+if auto-record is off). Hang up, and about a minute later your notes are ready: open them
+from the notification, the bar, or the app launcher (`muesli`).
+
+```text
+muesli-cli status | watch [--json]            what's happening now
+muesli-cli toggle | start | stop | discard    control recording
+muesli-cli record | ignore                    answer an "ask first" prompt
+muesli-cli auto-record on|off|toggle
+muesli-cli list | show <id> | open [<id>]
+muesli-cli rename <id> "Title"
+muesli-cli rename-speaker <id> "Speaker 2" "Lena"
+muesli-cli reprocess <id> | enhance <id> | delete <id>
+muesli-cli detect                             debug: what the call detector sees
+```
+
+Hyprland keybind example: `bind = SUPER SHIFT, M, exec, muesli-cli toggle`
+
+## Privacy and data
+
+- **What leaves your machine:** speech-only audio goes to OpenRouter for transcription;
+  transcripts and your notes go to OpenRouter's chat models for titles, notes and questions.
+  Nothing else is sent anywhere.
+- **Zero data retention:** set `zdr = true` to route only to OpenRouter providers that don't
+  store requests.
+- **On disk:** recordings, transcripts and notes stay in `~/.local/share/muesli/`, and the API
+  key in `~/.config/muesli/openrouter.key`. Both folders are private to your user (0700), and
+  the key file is 0600. Audio is kept until you delete the meeting, unless you set
+  `audio_retention_days`.
+- **Consent:** recording laws differ by place, and some require everyone's consent. Let
+  people know you're taking notes.
+
+## Cost
+
+You pay OpenRouter directly, per use. With the defaults, transcription is about
+$0.002 per minute of speech per channel (silence is never sent), and notes with Claude Sonnet 5.5
+cost a few cents per meeting. A typical one-hour call comes to roughly $0.10–0.30. Each
+meeting shows what it cost.
+
+## Configuration
+
+`~/.config/muesli/config.toml` (every field optional; the Settings dialog edits the common ones):
+
+```toml
+[openrouter]
+stt_models    = ["elevenlabs/scribe-v2", "assemblyai/universal-3-6-pro", "fish-audio/transcribe-1-pro"]
+chat_model    = "anthropic/claude-sonnet-5.5"  # titles and questions
+enhance_model = "anthropic/claude-sonnet-5.5"  # notes
+zdr           = false                          # true: zero-data-retention providers only
+
+[recording]
+auto_record          = true    # false: ask before recording
+start_debounce_s     = 5
+end_grace_s          = 20
+audio_retention_days = 0       # 0 = keep audio until the meeting is deleted
+echo_cancellation    = true
+
+[apps.discord]
+auto_record = false            # per-app override
+```
+
+Custom note sections: put a template in `~/.config/muesli/templates/default.md`.
+
+## Development
+
+| Path | What |
 |---|---|
-| `crates/core` | model, detection rules, session FSM, transcript logic, prompts, SQLite store, IPC protocol, OpenRouter client (pure + tested) |
-| `crates/audio` | PipeWire capture, Opus/Ogg, VAD, chunking, echo cancellation |
-| `crates/daemon` | `muesli-daemon`: detector, session loop, pipeline, socket server, notifications |
+| `crates/core` | Domain model, detection rules, recording state machine, transcript logic, prompts, SQLite store, IPC protocol, OpenRouter client. Pure and unit-tested. |
+| `crates/audio` | PipeWire capture, Ogg Opus, voice activity detection, chunking, echo cancellation |
+| `crates/daemon` | `muesli-daemon`: detector, session loop, post-call pipeline, socket server, notifications |
 | `crates/cli` | `muesli-cli` |
-| `crates/ui` | `muesli`: GTK4/libadwaita notes app |
-| `omarchy-plugin/` | Omarchy shell bar widget + panel |
+| `crates/ui` | `muesli`: the GTK4 / libadwaita notes app |
+| `omarchy-plugin/` | Omarchy shell bar widget and panel (QML) |
 
-Dev: `MUESLI_HOME=/tmp/muesli-dev` isolates config, data and the socket. `cargo test --workspace`.
+```bash
+cargo test --workspace
+MUESLI_HOME=/tmp/muesli-dev ./target/debug/muesli-daemon      # isolated config, data and socket
+MUESLI_HOME=/tmp/muesli-dev cargo run -p muesli-ui --example seed   # demo meetings for the app
+```
+
+`MUESLI_UI_DEBUG=1 muesli` logs UI events to stderr.
+
+## License
+
+[MIT](LICENSE)
