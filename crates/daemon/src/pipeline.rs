@@ -223,10 +223,19 @@ async fn steps(ctx: &Arc<Ctx>, id: &str, enhance_only: bool) -> Result<()> {
             labels.dedup();
             let template = load_template();
             let msgs = prompts::enhance_messages(&transcript::render_numbered(&segs), &notes.user_md, &template, &labels);
-            let r = client.chat(&cfg.openrouter.enhance_model, &msgs, true).await?;
-            m.cost_usd += r.cost;
-            let (enhanced, speakers) = prompts::parse_enhanced(&r.content)
-                .ok_or_else(|| anyhow!("the notes model returned something unreadable"))?;
+            // Models occasionally return malformed JSON; one fresh attempt usually fixes it.
+            let mut parsed = None;
+            for attempt in 1..=2 {
+                let r = client.chat(&cfg.openrouter.enhance_model, &msgs, true).await?;
+                m.cost_usd += r.cost;
+                parsed = prompts::parse_enhanced(&r.content);
+                if parsed.is_some() {
+                    break;
+                }
+                let head: String = r.content.chars().take(160).collect();
+                tracing::warn!("notes reply {attempt}/2 unreadable: {head:?}");
+            }
+            let (enhanced, speakers) = parsed.ok_or_else(|| anyhow!("the notes model returned something unreadable"))?;
             let enhanced = prompts::validate_sources(prompts::scrub_labels(enhanced, &speakers), segs.len());
             ctx.db(|c| store::set_enhanced(c, id, Some(&enhanced)))?;
             m.speaker_names = speakers;
