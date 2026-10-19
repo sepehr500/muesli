@@ -5,7 +5,7 @@ use chrono::{DateTime, Datelike, NaiveDate, TimeZone};
 use muesli_core::detect::App;
 use muesli_core::ipc::{SessionView, Status};
 use muesli_core::model::{
-    EnhancedNotes, Meeting, MeetingState, Pipeline, Segment, StepKind, StepStatus, fallback_title, human_duration,
+    EnhancedNotes, Meeting, MeetingState, Pipeline, Segment, StepKind, StepStatus, human_duration,
 };
 use muesli_core::transcript::{display_speaker, other_speaker_count};
 use std::collections::BTreeMap;
@@ -107,45 +107,9 @@ pub fn app_label(app: Option<App>) -> &'static str {
     app.map(App::label).unwrap_or("Manual")
 }
 
-// ------------------------------------------------------------------ naming
+// ------------------------------------------------------------------ title
 
-/// Suggestion chips: distinct LLM suggestions, then the offline fallback (dashed chip).
-#[derive(Debug, Clone, PartialEq)]
-pub struct Chip {
-    pub title: String,
-    pub fallback: bool,
-}
-
-pub fn chips(m: &Meeting) -> Vec<Chip> {
-    let fb = fallback_title(m.app, m.started_at);
-    let suggestions = m
-        .title_suggestions
-        .iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty() && *s != fb)
-        .fold(Vec::<String>::new(), |mut v, s| {
-            if !v.iter().any(|x| x.eq_ignore_ascii_case(&s)) {
-                v.push(s);
-            }
-            v
-        });
-    suggestions
-        .into_iter()
-        .map(|title| Chip { title, fallback: false })
-        .chain(std::iter::once(Chip { title: fb, fallback: true }))
-        .collect()
-}
-
-/// Text to prefill the title field with: current title, best suggestion, or fallback.
-pub fn initial_title(m: &Meeting) -> String {
-    m.title
-        .clone()
-        .filter(|t| !t.trim().is_empty())
-        .or_else(|| m.title_suggestions.first().cloned())
-        .unwrap_or_else(|| fallback_title(m.app, m.started_at))
-}
-
-/// What "Save" should send for the typed title.
+/// What committing the typed title should send.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TitleAction {
     Confirm,
@@ -161,11 +125,6 @@ pub fn title_action(m: &Meeting, typed: &str) -> TitleAction {
         (false, true, false) => TitleAction::Confirm,
         (false, false, _) => TitleAction::Rename(typed.to_string()),
     }
-}
-
-/// Whether the post-call naming chrome is shown.
-pub fn shows_naming(m: &Meeting, skipped: bool) -> bool {
-    !m.title_confirmed && !skipped && matches!(m.state, MeetingState::Processing | MeetingState::Ready)
 }
 
 pub fn notes_done(p: &Pipeline) -> bool {
@@ -504,16 +463,8 @@ mod tests {
     }
 
     #[test]
-    fn naming() {
+    fn title_edits() {
         let mut m = meeting(at(2025, 10, 17, 13, 25), 37);
-        m.state = MeetingState::Processing;
-        m.title_suggestions = vec!["Offline sync spec review".into(), "offline sync spec review".into(), "B".into()];
-        let c = chips(&m);
-        assert_eq!(c.len(), 3);
-        assert!(c[2].fallback && c[2].title.starts_with("Zoom call · Oct 17"));
-        assert_eq!(initial_title(&m), "Offline sync spec review");
-        assert!(shows_naming(&m, false));
-        assert!(!shows_naming(&m, true));
         m.title = Some("Offline sync spec review".into());
         assert_eq!(title_action(&m, " Offline sync spec review "), TitleAction::Confirm);
         assert_eq!(title_action(&m, "New"), TitleAction::Rename("New".into()));
@@ -543,7 +494,7 @@ mod tests {
     #[test]
     fn footer_states() {
         assert_eq!(footer(None, 0).kind, FooterKind::Offline);
-        let s = Status { session: SessionView::Idle, auto_record: true, processing: vec![], needs_name: vec![], api_key: true };
+        let s = Status { session: SessionView::Idle, auto_record: true, processing: vec![], api_key: true };
         assert_eq!(footer(Some(&s), 0).title, "Listening for calls");
         assert_eq!(footer(Some(&s), 0).subtitle, "Auto-record on");
         let r = Status {

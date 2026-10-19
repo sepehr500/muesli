@@ -25,8 +25,6 @@ Panel {
   readonly property color muted: Color.muted
   readonly property color onAccent: Color.background
   readonly property color hairline: Util.alpha(foreground, 0.12)
-  // colors.toml has no "success" role in Color; read the theme's green.
-  property color green: accent
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   // --------------------------------------------------------------- settings
@@ -50,19 +48,16 @@ Panel {
 
   readonly property var session: status && status.session ? status.session : ({ kind: "idle" })
   readonly property var processing: status ? (status.processing || []) : []
-  readonly property var needsName: status ? (status.needs_name || []) : []
-  readonly property var naming: needsName.length > 0 ? needsName[0] : null
   readonly property bool autoRecord: autoRecordPending !== null ? autoRecordPending : !!(status && status.auto_record)
 
-  // Bar priority: what needs you now > what's happening > what's waiting.
+  // Bar priority: what needs you now > what's happening.
   readonly property string mode: !connected ? "offline"
     : session.kind === "recording" ? "recording"
     : session.kind === "prompting" ? "prompting"
     : processing.length > 0 ? "processing"
-    : naming ? "naming"
     : "idle"
-  // The panel prefers the naming form over a bare progress line.
-  readonly property string panelMode: mode === "processing" ? (naming ? "naming" : "idle") : mode
+  // The panel shows processing as a progress line in the idle layout.
+  readonly property string panelMode: mode === "processing" ? "idle" : mode
 
   // ------------------------------------------------------------ pure helpers
 
@@ -77,10 +72,6 @@ Panel {
     return s >= 3600 ? Math.floor(s / 3600) + ":" + pad2(Math.floor(s / 60) % 60) + ":" + pad2(s % 60)
                      : pad2(Math.floor(s / 60)) + ":" + pad2(s % 60)
   }
-  function humanDuration(ms) {
-    var m = Math.round(ms / 60000)
-    return m < 1 ? "<1 min" : m < 60 ? m + " min" : Math.floor(m / 60) + " h " + (m % 60) + " min"
-  }
   function stepsDone(p) { return p && p.pipeline ? p.pipeline.steps.filter(s => s.status === "done").length : 0 }
   function stepsTotal(p) { return p && p.pipeline ? p.pipeline.steps.length : 4 }
   function activeStep(p) {
@@ -91,12 +82,6 @@ Panel {
     return active ? (labels[active.kind] || "Working…") : "Queued"
   }
   function unique(xs) { return xs.filter((x, i) => x && xs.indexOf(x) === i) }
-  function topSuggestion(n) { return n ? ((n.suggestions && n.suggestions[0]) || n.title || "") : "" }
-  function alternatives(n) {
-    if (!n) return []
-    var top = topSuggestion(n)
-    return unique((n.suggestions || []).concat([n.title])).filter(s => s !== top).slice(0, 3)
-  }
   readonly property double recordingMs: session.kind === "recording" ? nowMs - Number(session.started_at || nowMs) : 0
   readonly property string sessionLine: unique([appLabel(session.app), session.hint || ""]).join(" · ")
 
@@ -106,7 +91,6 @@ Panel {
     case "prompting": return "Call detected in " + appLabel(session.app) + " — click to record"
     case "recording": return "Recording " + (session.app ? appLabel(session.app) : "manually") + " · " + clock(recordingMs) + " — right-click to stop"
     case "processing": return "Wrapping up " + stepsDone(processing[0]) + "/" + stepsTotal(processing[0]) + " · " + activeStep(processing[0])
-    case "naming": return "Notes ready — name this meeting"
     default: return "Muesli · listening for calls" + (autoRecord ? " · auto-record on" : "")
     }
   }
@@ -178,22 +162,8 @@ Panel {
   }
   function setAutoRecord(v) { autoRecordPending = v; run(["auto-record", v ? "on" : "off"]) }
   function openNotes(id) { run(id ? ["open", id] : ["open"]) }
-  function saveName() {
-    if (!naming) return
-    var title = titleField.text.trim()
-    if (title === "" || title === naming.title) run(["confirm", naming.meeting_id])
-    else run(["rename", naming.meeting_id, title])
-  }
 
   Timer { id: clearError; interval: 8000; onTriggered: root.actionError = "" }
-
-  // Prefill the title once per meeting so status churn never clobbers typing.
-  property string namingId: ""
-  onNamingChanged: if (naming && naming.meeting_id !== namingId) {
-    namingId = naming.meeting_id
-    titleField.text = topSuggestion(naming)
-    titleField.selectAll()
-  }
 
   // Ticks only when a visible clock needs it.
   Timer {
@@ -213,32 +183,10 @@ Panel {
     onRunningChanged: if (!running) root.pulse = 1
   }
 
-  FileView {
-    id: themeColors
-    path: Quickshell.env("HOME") + "/.local/state/omarchy/current/theme/colors.toml"
-    printErrors: false
-    onLoaded: {
-      var m = text().match(/^\s*(?:green|color2)\s*=\s*["']?(#[0-9A-Fa-f]{6})/m)
-      root.green = m ? m[1] : Color.accent
-    }
-  }
-  Connections {
-    target: Color
-    function onForegroundChanged() { themeColors.reload() }
-    function onAccentChanged() { themeColors.reload() }
-  }
-
   onOpenedChanged: if (opened) {
     meHistory = zeros(meterBars)
     themHistory = zeros(meterBars)
     nowMs = Date.now()
-    if (panelMode === "naming") titleField.selectAll()
-  }
-
-  // A hidden title field must not keep focus (it would swallow panel keys).
-  onPanelModeChanged: {
-    if (panelMode !== "naming" && titleField.activeFocus) keyCatcher.forceActiveFocus()
-    else if (panelMode === "naming" && opened) Qt.callLater(() => { titleField.forceActiveFocus(); titleField.selectAll() })
   }
 
   IpcHandler {
@@ -388,7 +336,7 @@ Panel {
     fixedHeight: vertical ? Math.max(Style.bar.iconSlot, pill.height + Style.space(8)) : -1
     onPressed: function(code) {
       if (code === Qt.RightButton) root.run(["toggle"])
-      else if (code === Qt.MiddleButton) root.openNotes(root.naming ? root.naming.meeting_id : "")
+      else if (code === Qt.MiddleButton) root.openNotes("")
       else root.toggle()
     }
 
@@ -410,14 +358,9 @@ Panel {
         spacing: Style.space(6)
 
         Ridge {
-          visible: root.mode === "idle" || root.mode === "offline" || root.mode === "naming"
+          visible: root.mode === "idle" || root.mode === "offline"
           stroke: root.barFg
-          opacity: root.mode === "offline" ? 0.35 : root.mode === "idle" ? 0.6 : 1
-        }
-        Dot {
-          visible: root.mode === "naming"
-          size: Style.space(6)
-          tint: root.green
+          opacity: root.mode === "offline" ? 0.35 : 0.6
         }
         Dot {
           visible: root.mode === "prompting"
@@ -458,25 +401,21 @@ Panel {
     owner: root
     bar: root.bar
     open: root.opened
-    focusTarget: root.panelMode === "naming" ? titleField : keyCatcher
+    focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(320))
     contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(560))
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: titleField.activeFocus && root.panelMode === "naming"
 
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
-      onActivateRequested: {
-        if (root.panelMode === "prompting") root.run(["record"])
-        else if (root.panelMode === "naming") root.saveName()
-      }
+      onActivateRequested: if (root.panelMode === "prompting") root.run(["record"])
       onTextKey: function(t) {
         if (root.panelMode === "prompting" && (t === "r" || t === "R")) root.run(["record"])
         else if (root.panelMode === "prompting" && (t === "i" || t === "I")) root.run(["ignore"])
-        else if (t === "o" || t === "O") root.openNotes(root.naming ? root.naming.meeting_id : "")
+        else if (t === "o" || t === "O") root.openNotes("")
         else if (t === "a" || t === "A") root.setAutoRecord(!root.autoRecord)
       }
 
@@ -498,7 +437,6 @@ Panel {
 
             readonly property color tint: root.panelMode === "prompting" ? root.accent
               : root.panelMode === "recording" ? root.red
-              : root.panelMode === "naming" ? root.green
               : root.muted
 
             Spinner { visible: root.panelMode === "idle" && root.processing.length > 0 }
@@ -511,7 +449,6 @@ Panel {
             Caps {
               text: root.panelMode === "prompting" ? "Call detected"
                 : root.panelMode === "recording" ? "Rec"
-                : root.panelMode === "naming" ? (root.naming && root.naming.notes_ready === false ? "Transcript ready" : "Notes ready")
                 : root.panelMode === "offline" ? "Offline"
                 : root.processing.length > 0 ? "Wrapping up"
                 : "Listening"
@@ -527,7 +464,6 @@ Panel {
             color: root.muted
             text: root.panelMode === "prompting" ? root.appLabel(root.session.app)
               : root.panelMode === "recording" ? (root.session.app ? root.appLabel(root.session.app) : "Manual")
-              : root.panelMode === "naming" && root.naming ? root.unique([root.appLabel(root.naming.app), root.humanDuration(root.naming.duration_ms || 0)]).join(" · ")
               : root.panelMode === "idle" ? (root.autoRecord ? "auto-record on" : "asks first")
               : ""
           }
@@ -638,75 +574,6 @@ Panel {
           width: parent.width
           text: "Next meeting  →"
           onClicked: root.run(["next"])
-        }
-
-        // ---------- naming ----------
-        Column {
-          visible: root.panelMode === "naming"
-          width: parent.width
-          spacing: Style.space(8)
-
-          Caps { text: "Name it"; color: root.muted }
-
-          TextField {
-            id: titleField
-            width: parent.width
-            foreground: Color.popups.text
-            accent: root.accent
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.title
-            selectByMouse: true
-            placeholderText: "Meeting title"
-            onAccepted: root.saveName()
-            Keys.onEscapePressed: root.close()
-          }
-
-          Column {
-            width: parent.width
-            spacing: Style.space(2)
-
-            Repeater {
-              model: root.alternatives(root.naming)
-              Rectangle {
-                id: suggestion
-                required property string modelData
-                width: parent.width
-                height: Style.space(28)
-                radius: Style.cornerRadius
-                color: rowMouse.containsMouse ? Style.hoverFillFor(root.foreground, root.accent) : "transparent"
-                readonly property bool chosen: titleField.text === modelData
-
-                Label {
-                  anchors.fill: parent
-                  anchors.leftMargin: Style.space(4)
-                  anchors.rightMargin: Style.space(4)
-                  text: "↳ " + suggestion.modelData
-                  color: suggestion.chosen ? root.accent : Qt.darker(Color.popups.text, 1.1)
-                }
-                MouseArea {
-                  id: rowMouse
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: { titleField.text = suggestion.modelData; titleField.forceActiveFocus() }
-                }
-              }
-            }
-          }
-
-          Label {
-            visible: root.needsName.length > 1
-            color: root.muted
-            font.pixelSize: Style.font.bodySmall
-            text: "+" + (root.needsName.length - 1) + " more meeting" + (root.needsName.length > 2 ? "s" : "") + " to name in the app"
-          }
-        }
-
-        ButtonPair {
-          id: namingButtons
-          visible: root.panelMode === "naming"
-          ActionButton { width: namingButtons.cell; primary: true; text: "Save"; onClicked: root.saveName() }
-          ActionButton { width: namingButtons.cell; text: "Open notes"; onClicked: root.openNotes(root.naming ? root.naming.meeting_id : "") }
         }
 
         // ---------- idle / offline ----------

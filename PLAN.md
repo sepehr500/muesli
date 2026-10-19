@@ -139,7 +139,9 @@ There's an optional per-app override in config (`[apps.discord] auto_record = fa
    - The two channels are interleaved by mapped timestamps.
 7. **Echo backstop:** drop any Me segment whose text fuzzily matches a Them segment within ±2 s. This catches leftover echo that AEC missed.
 8. **LLM:** suggest a title and enhance the notes.
-9. Mark the meeting ready and send a notification: "Notes ready — name this meeting".
+9. Confirm the best suggested title, mark the meeting ready and send a "Notes ready"
+   notification. (Originally a naming prompt; dropped in favour of naming automatically.
+   The title stays editable in the app.)
 
 The cost for an hour-long call with silence trimmed is roughly $0.20–0.40.
 
@@ -168,8 +170,10 @@ audio_retention_days = 0     # 0 = keep forever
 
 ## 8. Naming flow
 
-1. The call ends. The bar shows "Processing…", then a notification says "Notes ready — name this meeting".
-2. The title field is pre-filled with the best suggestion, with alternatives shown as chips. The offline fallback is `"{App} call · {Mon DD, HH:MM}"`, plus the window hint (for example "Acme · #standup").
+1. The call ends. The bar shows "Processing…", then a notification says "Notes ready" with the
+   title muesli picked.
+2. The best suggestion becomes the title. Without one (no speech, or the model failed), the
+   window hint (for example "Acme · #standup") or the fallback `"{App} call · {Mon DD, HH:MM}"` is used.
 3. You can rename at any time from the app, the CLI, or the bar panel.
 
 ## 9. Omarchy plugin (`<user>.muesli`)

@@ -36,7 +36,7 @@ meeting, not a monthly fee.
 2. **Take notes, or don't.** Type rough bullets in the app while you talk. They stay yours,
    word for word.
 3. **Hang up.** Echo is removed, silence trimmed, speech transcribed, and your bullets are
-   filled in with what was decided and who's doing what. Pick a suggested title and you're done.
+   filled in with what was decided and who's doing what. The meeting is titled for you, too.
 4. **Check anything.** Every point carries a timestamp. Click it to jump to that moment in the
    transcript and hear it.
 
@@ -70,14 +70,15 @@ meeting, not a monthly fee.
   against the real transcript, so the AI can't cite lines that don't exist.
 - **Play it back.** Listen to any meeting with the echo already removed, scrub through it, or
   click any line of the transcript to play from there. The transcript follows along.
-- **Name it when it's over.** Title suggestions from what was actually said, one click to accept.
+- **Named for you.** When the call ends, muesli titles it from what was actually said. No
+  naming step: click the title any time to change it.
 - **A transcript that knows who's talking.** "You" comes from your mic; other voices are
   separated by the transcription model and named when the conversation makes it clear.
   Rename or merge speakers with a click, and copy the whole transcript as text.
 - **Ask your meeting.** "What did we decide about Windows?" Answers come from that meeting's
   notes and transcript, using the model you pick: Claude, GPT, Gemini, Grok, DeepSeek, or
   anything else on OpenRouter.
-- **Lives in your Omarchy bar.** Recording timer, Record / Ignore, Stop / Next meeting / Discard and naming,
+- **Lives in your Omarchy bar.** Recording timer, Record / Ignore, Stop / Next meeting / Discard,
   styled by your current theme.
 - **Featherweight.** The background service idles at about 11 MB of memory and 0% CPU. The app
   is native GTK4 / libadwaita. No Electron, no webview, no muesli account.
@@ -86,14 +87,13 @@ meeting, not a monthly fee.
 
 ## Screenshots
 
-| Name it after the call | Dark mode |
+| Wrapping up after the call (already named) | Dark mode |
 |---|---|
-| ![Naming a meeting after the call, with suggested titles and processing steps](docs/screenshots/name-this-meeting.png) | ![The notes app in dark mode](docs/screenshots/dark-mode.png) |
+| ![A meeting wrapping up after the call: titled automatically, with processing steps](docs/screenshots/wrapping-up.png) | ![The notes app in dark mode](docs/screenshots/dark-mode.png) |
 
-The Omarchy bar widget asking to record, recording, and naming a finished call, in your
-current Omarchy theme:
+The Omarchy bar widget's panel when a call is detected, in your current Omarchy theme:
 
-![Omarchy bar panels: call detected, recording, notes ready](docs/screenshots/omarchy-bar-panels.png)
+![Omarchy bar panel: call detected, with Record and Ignore](docs/screenshots/omarchy-bar-panels.png)
 
 <p align="center"><img src="docs/screenshots/model-picker.png" width="300" alt="Model picker for questions and titles"></p>
 

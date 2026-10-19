@@ -59,6 +59,7 @@ fn names(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
 
 fn seeds() -> Vec<Seed> {
     // Post-call, still naming + enhancing (the "Name this meeting" artboard).
+    // Wrapping up: transcribed (so already named for you), notes still being written.
     let mut untitled = store::new_meeting(Some(App::Zoom), None, at(0, 13, 25));
     untitled.ended_at = Some(untitled.started_at + 37 * 60_000);
     untitled.state = MeetingState::Processing;
@@ -70,6 +71,8 @@ fn seeds() -> Vec<Seed> {
         .with(StepKind::Transcribed, StepStatus::Done, Some("You and 3 others · cost $0.13".into()))
         .with(StepKind::Notes, StepStatus::Active, Some("Filling in your bullets with decisions and to-dos".into()));
     untitled.cost_usd = 0.13;
+    untitled.title = untitled.title_suggestions.first().cloned();
+    untitled.title_confirmed = true;
 
     let mut q4 = ready("Q4 roadmap with Lena", App::Zoom, Some("Q4 roadmap"), at(0, 10, 30), 42);
     q4.speaker_names = names(&[("c0s0", "Lena"), ("c0s1", "Marco"), ("c0s2", "Priya")]);

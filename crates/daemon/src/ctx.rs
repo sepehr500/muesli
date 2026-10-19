@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 use muesli_core::config::{self, Config};
-use muesli_core::ipc::{Event, NeedsNameView, ProcessingView, SessionView, Status};
-use muesli_core::model::{Meeting, MeetingState, StepKind, StepStatus, fallback_title};
+use muesli_core::ipc::{Event, ProcessingView, SessionView, Status};
+use muesli_core::model::{Meeting, MeetingState, fallback_title};
 use muesli_core::session;
 use muesli_core::store;
 use muesli_core::store::Connection;
@@ -61,9 +61,7 @@ impl Ctx {
 
     pub fn status(&self) -> Result<Status> {
         let session = self.session_view.read().expect("view lock").clone();
-        let (processing, naming) = self.db(|c| {
-            Ok((store::meetings_in_state(c, MeetingState::Processing)?, store::needing_name(c, 3)?))
-        })?;
+        let processing = self.db(|c| store::meetings_in_state(c, MeetingState::Processing))?;
         let title = |m: &Meeting| m.title.clone().unwrap_or_else(|| fallback_title(m.app, m.started_at));
         Ok(Status {
             session,
@@ -71,17 +69,6 @@ impl Ctx {
             processing: processing
                 .iter()
                 .map(|m| ProcessingView { meeting_id: m.id.clone(), title: title(m), app: m.app, pipeline: m.pipeline.clone() })
-                .collect(),
-            needs_name: naming
-                .iter()
-                .map(|m| NeedsNameView {
-                    meeting_id: m.id.clone(),
-                    title: title(m),
-                    suggestions: m.title_suggestions.clone(),
-                    app: m.app,
-                    duration_ms: m.duration_ms().unwrap_or(0),
-                    notes_ready: m.pipeline.status_of(StepKind::Notes) == StepStatus::Done,
-                })
                 .collect(),
             api_key: config::api_key().is_some(),
         })

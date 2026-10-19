@@ -66,13 +66,6 @@ pub fn icon_button(icon: &'static Icon, text: Option<&str>, classes: &[&str]) ->
     b
 }
 
-pub fn spacer() -> gtk::Box {
-    let b = hbox(0, &[]);
-    b.set_hexpand(true);
-    b.set_vexpand(true);
-    b
-}
-
 mod imp {
     use super::*;
     use std::cell::{Cell, RefCell};

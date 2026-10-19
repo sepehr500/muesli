@@ -296,6 +296,11 @@ async fn main() -> Result<()> {
         return server.await?;
     }
 
+    match ctx.db(|c| store::confirm_pending_titles(c)) {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("named {n} meeting(s) that were waiting for a title"),
+        Err(e) => tracing::warn!("confirm pending titles: {e:#}"),
+    }
     for id in recover(&ctx)? {
         tokio::spawn(pipeline::run(ctx.clone(), id, false));
     }

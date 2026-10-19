@@ -14,7 +14,6 @@ use muesli_core::openrouter::Message;
 use muesli_core::{config, prompts, store, transcript};
 use muesli_audio::playback::Player;
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -48,7 +47,6 @@ struct State {
     current: Option<Meeting>,
     notes: Option<Notes>,
     status: Option<Status>,
-    skipped: HashSet<String>,
     mode: Option<(String, Mode)>,
     /// Programmatic widget updates in progress: ignore change signals.
     loading: bool,
@@ -89,11 +87,7 @@ pub struct Win {
     enhance_btn: gtk::Button,
     column: gtk::Box,
     meta: gtk::Box,
-    eyebrow: gtk::Label,
-    title_wrap: gtk::Box,
     title: gtk::TextView,
-    naming: gtk::Box,
-    chips: adw::WrapBox,
     body: gtk::Stack,
     enhanced: gtk::Box,
     notes_view: gtk::TextView,
@@ -257,29 +251,10 @@ impl Win {
 
         // ---------------------------------------------------------------- meeting column
         let meta = hbox(20, &[]);
-        let eyebrow = label("NAME THIS MEETING", &["eyebrow"]);
         let title = tview(&["title"]);
         title.set_accepts_tab(false);
         let title_wrap = with(vbox(0, &["title-wrap"]), &[title.upcast_ref()]);
 
-        let chips = adw::WrapBox::new();
-        chips.set_child_spacing(8);
-        chips.set_line_spacing(8);
-        let suggestion_hint = with(
-            hbox(6, &[]),
-            &[IconView::sized(&icons::SPARKLE, 14, 14).upcast_ref(), label("Or pick a suggestion", &["hint"]).upcast_ref()],
-        );
-        let save = gtk::Button::new();
-        save.set_child(Some(&with(hbox(10, &[]), &[label("Save", &[]).upcast_ref(), label("↵", &["key"]).upcast_ref()])));
-        save.set_css_classes(&["primary"]);
-        let skip = gtk::Button::with_label("Skip for now");
-        skip.set_css_classes(&["skip"]);
-        let buttons = with(hbox(16, &[]), &[save.upcast_ref(), skip.upcast_ref()]);
-        buttons.set_margin_top(28);
-        buttons.set_halign(gtk::Align::Start);
-        let naming = with(vbox(12, &[]), &[suggestion_hint.upcast_ref(), chips.upcast_ref()]);
-        naming.set_margin_top(20);
-        let naming = with(vbox(0, &[]), &[naming.upcast_ref(), buttons.upcast_ref()]);
 
         let enhanced = vbox(0, &[]);
         let notes_view = tview(&["user-notes"]);
@@ -307,7 +282,7 @@ impl Win {
 
         let column = with(
             vbox(0, &["column"]),
-            &[meta.upcast_ref(), eyebrow.upcast_ref(), title_wrap.upcast_ref(), naming.upcast_ref(), body.upcast_ref()],
+            &[meta.upcast_ref(), title_wrap.upcast_ref(), body.upcast_ref()],
         );
         let clamp = LeftClamp::new(COLUMN, &column);
         clamp.set_margin_start(96);
@@ -484,11 +459,7 @@ impl Win {
             enhance_btn,
             column,
             meta,
-            eyebrow,
-            title_wrap,
             title,
-            naming,
-            chips,
             body,
             enhanced,
             notes_view,
@@ -550,8 +521,6 @@ impl Win {
             win.set_ask_model(&e.text());
             e.set_text("");
         }));
-        save.connect_clicked(glib::clone!(#[strong] win, move |_| win.commit_title()));
-        skip.connect_clicked(glib::clone!(#[strong] win, move |_| win.skip_naming()));
         win.enhance_btn.connect_clicked(glib::clone!(#[strong] win, move |_| win.enhance()));
         send.connect_clicked(glib::clone!(#[strong] win, move |_| win.ask()));
         win.ask_entry.connect_activate(glib::clone!(#[strong] win, move |_| win.ask()));
@@ -592,6 +561,8 @@ impl Win {
                     glib::Propagation::Stop
                 }
                 gdk::Key::Escape => {
+                    // Revert: leaving focus would otherwise save the edit.
+                    win.st.borrow_mut().title_dirty = false;
                     win.unfocus();
                     win.render_meeting(true);
                     glib::Propagation::Stop
@@ -602,8 +573,7 @@ impl Win {
         win.title.add_controller(title_keys);
         let title_focus = gtk::EventControllerFocus::new();
         title_focus.connect_leave(glib::clone!(#[strong] win, move |_| {
-            let (naming, dirty) = (win.naming.is_visible(), win.st.borrow().title_dirty);
-            if !naming && dirty {
+            if win.st.borrow().title_dirty {
                 win.commit_title();
             }
         }));
@@ -612,7 +582,6 @@ impl Win {
             if !win.st.borrow().loading {
                 win.st.borrow_mut().title_dirty = true;
             }
-            win.sync_chip_selection();
         }));
 
         win.notes_view.buffer().connect_changed(glib::clone!(#[strong] win, move |b| win.on_notes_changed(b.char_count() == 0)));
@@ -662,16 +631,9 @@ impl Win {
         win
     }
 
-    /// Initial focus: the title while naming, otherwise nothing (no stray focus ring).
+    /// Initial focus: nothing (no stray focus ring).
     pub fn settle_focus(&self) {
-        match self.naming.is_visible() && self.pages.visible_child_name().as_deref() == Some("meeting") {
-            true => {
-                self.title.grab_focus();
-                let b = self.title.buffer();
-                b.place_cursor(&b.end_iter());
-            }
-            false => self.unfocus(),
-        }
+        self.unfocus();
     }
 
     /// Dev aid for screenshots (`MUESLI_UI_DEMO=mine|transcript|settings|plus|ask`).
@@ -1025,8 +987,6 @@ impl Win {
         self.top_left.set_visible(true);
         self.top_right.set_visible(true);
 
-        let skipped = self.st.borrow().skipped.contains(&m.id);
-        let naming = vm::shows_naming(&m, skipped);
         let wrapping = matches!(m.state, MeetingState::Processing | MeetingState::Failed);
         let has_enhanced = notes.enhanced.as_ref().is_some_and(|n| !n.sections.is_empty() || !n.action_items.is_empty());
 
@@ -1061,33 +1021,15 @@ impl Win {
             self.meta.append(&item(&icons::PEOPLE, &people));
         }
 
-        // Title + naming chrome.
-        self.eyebrow.set_visible(naming);
-        self.naming.set_visible(naming);
-        match naming {
-            true => self.title_wrap.add_css_class("naming"),
-            false => self.title_wrap.remove_css_class("naming"),
-        }
+        // Title (click to rename; saved when you press Enter or click away).
         if full || !self.title.has_focus() {
-            let text = if naming { vm::initial_title(&m) } else { m.display_title() };
-            self.title.buffer().set_text(&text);
+            self.title.buffer().set_text(&m.display_title());
             self.st.borrow_mut().title_dirty = false;
             // GtkTextView validates its layout lazily and can miss the relayout when its
             // height grows from zero; nudge it once the layout is ready.
             let t = self.title.clone();
             glib::idle_add_local_once(move || t.queue_resize());
         }
-        clear_wrap(&self.chips);
-        vm::chips(&m).into_iter().for_each(|c| {
-            let b = gtk::Button::with_label(&c.title);
-            b.set_css_classes(if c.fallback { &["chip", "fallback"] } else { &["chip"] });
-            b.set_widget_name(&c.title);
-            b.connect_clicked(glib::clone!(#[strong(rename_to = w)] self, move |b| {
-                w.title.buffer().set_text(&b.widget_name());
-                w.title.grab_focus();
-            }));
-            self.chips.append(&b);
-        });
 
         // Body.
         match wrapping {
@@ -1144,10 +1086,6 @@ impl Win {
             st.notes = Some(notes);
             st.loading = false;
         }
-        self.sync_chip_selection();
-        if full && naming && self.window.is_visible() {
-            self.settle_focus();
-        }
     }
 
     fn set_mode(self: &Rc<Self>, mode: Mode) {
@@ -1159,21 +1097,9 @@ impl Win {
         }
     }
 
-    fn sync_chip_selection(&self) {
-        let typed = text_of(&self.title);
-        let mut child = self.chips.first_child();
-        while let Some(c) = child {
-            match c.widget_name().as_str() == typed.trim() {
-                true => c.add_css_class("selected"),
-                false => c.remove_css_class("selected"),
-            }
-            child = c.next_sibling();
-        }
-    }
-
     fn wrapping_widget(self: &Rc<Self>, m: &Meeting) -> gtk::Box {
         let root = vbox(0, &[]);
-        root.append(&spacer());
+        root.set_margin_top(40);
         if m.state == MeetingState::Failed {
             let err = para(m.error.as_deref().unwrap_or("Processing stopped."), &["error-line"]);
             let retry = gtk::Button::with_label("Reprocess");
@@ -1635,7 +1561,6 @@ impl Win {
         let Some(m) = self.st.borrow().current.clone() else { return };
         self.st.borrow_mut().title_dirty = false;
         let typed = text_of(&self.title).replace('\n', " ");
-        let naming = self.naming.is_visible();
         let req = match vm::title_action(&m, &typed) {
             TitleAction::Nothing => {
                 self.unfocus();
@@ -1656,21 +1581,9 @@ impl Win {
                 };
                 let _ = store::set_title(&w.db, &m.id, &title, true);
             }
-            if naming {
-                w.toast("Saved");
-            }
             w.reload_list();
             w.render_meeting(false);
         });
-    }
-
-    fn skip_naming(self: &Rc<Self>) {
-        let id = self.st.borrow().selected.clone();
-        if let Some(id) = id {
-            self.st.borrow_mut().skipped.insert(id);
-            self.unfocus();
-            self.render_meeting(true);
-        }
     }
 
     fn enhance(self: &Rc<Self>) {
@@ -1874,12 +1787,6 @@ fn chat_label(role: &str, content: &str) -> gtk::Label {
     let l = para(content, if role == "user" { &["q"] } else { &["a"] });
     l.set_selectable(role != "user");
     l
-}
-
-fn clear_wrap(b: &adw::WrapBox) {
-    while let Some(c) = b.first_child() {
-        b.remove(&c);
-    }
 }
 
 fn set_button_text(b: &gtk::Button, text: &str) {

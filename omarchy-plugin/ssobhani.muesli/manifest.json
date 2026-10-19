@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "author": "ssobhani",
   "license": "MIT",
-  "description": "Local AI meeting notes: call detection, recording state, and naming from the bar. Talks to muesli-daemon through muesli-cli.",
+  "description": "Local AI meeting notes: call detection, recording state, and Next meeting from the bar. Talks to muesli-daemon through muesli-cli.",
   "kinds": ["bar-widget"],
   "activation": "on-demand",
   "entryPoints": {
@@ -13,7 +13,7 @@
   },
   "barWidget": {
     "displayName": "Muesli",
-    "description": "Mountain-ridge icon that asks to record detected Zoom/Discord calls, shows a live timer while recording, progress while wrapping up, and a panel to name the meeting afterwards. Left = panel · right = start/stop recording · middle = open notes.",
+    "description": "Mountain-ridge icon that asks to record detected Zoom/Discord calls, shows a live timer while recording, progress while wrapping up, and a panel with Stop / Next meeting / Discard. Left = panel · right = start/stop recording · middle = open notes.",
     "category": "Productivity",
     "aliases": ["muesli", "meeting-notes", "notes"],
     "allowMultiple": false,

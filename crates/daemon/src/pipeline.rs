@@ -85,6 +85,18 @@ fn short_error(e: &anyhow::Error) -> String {
 
 async fn set_step(ctx: &Ctx, m: &mut Meeting, kind: StepKind, status: StepStatus, detail: Option<String>) -> Result<()> {
     m.pipeline = std::mem::take(&mut m.pipeline).with(kind, status, detail);
+    save(ctx, m)
+}
+
+/// Save the pipeline's copy of the meeting without clobbering a title the user set while
+/// it was running (the pipeline holds `m` across slow network calls).
+fn save(ctx: &Ctx, m: &mut Meeting) -> Result<()> {
+    if let Ok(cur) = ctx.meeting(&m.id)
+        && cur.title_confirmed
+    {
+        m.title = cur.title;
+        m.title_confirmed = true;
+    }
     ctx.save(m)
 }
 
@@ -186,6 +198,8 @@ async fn steps(ctx: &Arc<Ctx>, id: &str, enhance_only: bool) -> Result<()> {
         if m.title.is_none() {
             m.title = Some(m.hint.clone().unwrap_or_else(|| fallback_title(m.app, m.started_at)));
         }
+        // Named for you: the best suggestion is the title (rename any time in the app).
+        m.title_confirmed = true;
         set_step(ctx, &mut m, StepKind::Transcribed, StepStatus::Done, Some(detail)).await?;
     }
 
@@ -234,13 +248,9 @@ async fn steps(ctx: &Arc<Ctx>, id: &str, enhance_only: bool) -> Result<()> {
     }
 
     m.state = MeetingState::Ready;
-    ctx.save(&m)?;
+    save(ctx, &mut m)?;
     if !enhance_only {
-        let body = match m.title_confirmed {
-            true => m.display_title(),
-            false => format!("{} — name this meeting", m.display_title()),
-        };
-        ctx.notifier.info("Notes ready", &body, &[(&format!("open:{id}"), "Open notes")]);
+        ctx.notifier.info("Notes ready", &m.display_title(), &[(&format!("open:{id}"), "Open notes")]);
     }
     Ok(())
 }

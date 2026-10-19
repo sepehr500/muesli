@@ -9,9 +9,7 @@
   --gentian: #2147A6;
   --gentian-soft: #E8EEF8;
   --gentian-ink: #FFFFFF;
-  --gentian-sub: #B9C9EA;
   --chip-line: #D5DDE3;
-  --chip-dash: #C2CCD3;
   --swiss-red: #E2231A;
   --hover: rgba(27, 32, 36, 0.045);
   --shadow: rgba(27, 32, 36, 0.06);
@@ -187,37 +185,7 @@ textview.title {
 }
 textview.title text selection { background: var(--gentian-soft); color: var(--granite); }
 .title-wrap { margin-top: 14px; }
-.title-wrap.naming {
-  margin-top: 12px;
-  padding-bottom: 14px;
-  border-bottom: 2px solid var(--granite);
-}
-
-.eyebrow {
-  margin-top: 28px;
-  font-size: 11px; line-height: 14px; font-weight: 600;
-  letter-spacing: 0.88px;
-  color: var(--gentian);
-}
 .hint { font-size: 13px; line-height: 16px; color: var(--slate); }
-
-button.chip {
-  min-height: 32px; padding: 0 14px;
-  border-radius: 17px;
-  border: 1px solid var(--chip-line);
-  background: none; box-shadow: none;
-  font-size: 14px; line-height: 18px; font-weight: 500;
-  color: var(--granite);
-}
-button.chip:hover { background: var(--glacier); }
-button.chip.selected {
-  background: var(--gentian-soft);
-  border-color: var(--gentian);
-  color: var(--gentian);
-  font-weight: 600;
-}
-button.chip.fallback { border-style: dashed; border-color: var(--chip-dash); color: var(--slate); }
-button.chip.fallback.selected { color: var(--gentian); border-color: var(--gentian); }
 
 button.primary {
   min-height: 40px; padding: 0 18px;
@@ -229,7 +197,6 @@ button.primary {
 }
 button.primary:hover { filter: brightness(1.08); }
 button.primary.small { min-height: 32px; padding: 0 14px; font-size: 13px; border-radius: 8px; }
-button.primary .key { font-family: "JetBrains Mono", "JetBrainsMono Nerd Font", monospace; font-size: 12px; color: var(--gentian-sub); }
 button.skip {
   min-height: 40px; padding: 0 2px;
   background: none; box-shadow: none; border: none;

@@ -40,16 +40,8 @@ enum Cmd {
     Toggle,
     /// Turn auto-record on/off (persists to config.toml).
     AutoRecord { value: OnOff },
-    /// Name a meeting.
-    Rename {
-        id: String,
-        title: String,
-        /// Keep the naming prompt open.
-        #[arg(long)]
-        no_confirm: bool,
-    },
-    /// Accept the current title.
-    Confirm { id: String },
+    /// Rename a meeting.
+    Rename { id: String, title: String },
     /// Re-run the post-call pipeline.
     Reprocess { id: String },
     /// Re-run note enhancement only.
@@ -129,10 +121,9 @@ fn human_status(s: &Status) -> String {
             .unwrap_or("Queued");
         format!("\n  {} — {active} ({}/4)", p.title, p.pipeline.done_count())
     });
-    let naming = s.needs_name.iter().map(|n| format!("\n  Name this meeting: {} [{}]", n.title, n.meeting_id));
     let auto = if s.auto_record { "auto-record on" } else { "auto-record off" };
     let key = if s.api_key { "" } else { "\n  ⚠ No OpenRouter key — run: muesli-cli set-key" };
-    format!("{session} · {auto}{}{}{key}", processing.collect::<String>(), naming.collect::<String>())
+    format!("{session} · {auto}{}{key}", processing.collect::<String>())
 }
 
 /// Print one event; false if stdout is gone (reader closed the pipe).
@@ -207,10 +198,9 @@ fn main() -> Result<()> {
             call(Request::SetAutoRecord { value: v })?;
             println!("auto-record {}", if v { "on" } else { "off" });
         }
-        Cmd::Rename { id, title, no_confirm } => {
-            drop(call(Request::Rename { id, title, confirm: !no_confirm })?)
+        Cmd::Rename { id, title } => {
+            drop(call(Request::Rename { id, title, confirm: true })?)
         }
-        Cmd::Confirm { id } => drop(call(Request::ConfirmTitle { id })?),
         Cmd::Reprocess { id } => drop(call(Request::Reprocess { id })?),
         Cmd::Enhance { id } => drop(call(Request::Enhance { id })?),
         Cmd::Delete { id } => drop(call(Request::Delete { id })?),

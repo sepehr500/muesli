@@ -5,11 +5,11 @@ Speaks the newline-JSON protocol from crates/core/src/ipc.rs on
 $XDG_RUNTIME_DIR/muesli.sock (or $MUESLI_HOME/muesli.sock).
 
     python3 mock_daemon.py                 # start idle, wait for commands
-    python3 mock_daemon.py --cycle 8       # idle → prompting → recording → processing → needs_name, 8 s each
+    python3 mock_daemon.py --cycle 8       # idle → prompting → recording → processing, 8 s each
     python3 mock_daemon.py --state recording
 
 Jump to a state from another shell (mock-only request):
-    python3 mock_daemon.py --set needs_name
+    python3 mock_daemon.py --set processing
 
 Never run this while the real daemon is up: it refuses if the socket answers.
 """
@@ -52,7 +52,6 @@ class Mock:
         self.auto_record = False
         self.session = {"kind": "idle"}
         self.processing = []
-        self.needs_name = []
         self.seq = 0
 
     # ------------------------------------------------------------- snapshots
@@ -61,7 +60,6 @@ class Mock:
             "session": self.session,
             "auto_record": self.auto_record,
             "processing": self.processing,
-            "needs_name": self.needs_name,
             "api_key": True,
         }
 
@@ -89,7 +87,7 @@ class Mock:
         with self.lock:
             if name == "idle":
                 self.session = {"kind": "idle"}
-                self.processing, self.needs_name = [], []
+                self.processing = []
             elif name == "prompting":
                 self.session = {"kind": "prompting", "app": "discord", "hint": "Hiking crew · #planning", "since": now_ms() - 1000}
             elif name == "recording":
@@ -100,27 +98,9 @@ class Mock:
             elif name == "processing":
                 self.session = {"kind": "idle"}
                 self.processing = [{"meeting_id": self.new_id(), "title": "Zoom call · Oct 17, 14:02", "app": "zoom", "pipeline": pipeline(2)}]
-            elif name == "needs_name":
-                self.session = {"kind": "idle"}
-                self.processing = []
-                self.needs_name = [self.naming_row(self.new_id(), True)]
-            elif name == "both":
-                self.session = {"kind": "idle"}
-                self.processing = [{"meeting_id": self.new_id(), "title": "Discord call · Oct 17, 15:30", "app": "discord", "pipeline": pipeline(2)}]
-                self.needs_name = [self.naming_row(self.new_id(), True)]
             else:
                 raise ValueError(f"unknown state {name}")
         self.changed()
-
-    def naming_row(self, mid, ready):
-        return {
-            "meeting_id": mid,
-            "title": "Zoom call · Oct 17, 14:02",
-            "suggestions": ["Offline sync spec review", "Conflict handling with Marco", "Dec 12 release check-in"],
-            "app": "zoom",
-            "duration_ms": 37 * 60 * 1000,
-            "notes_ready": ready,
-        }
 
     def run_pipeline(self, mid, app):
         def work():
@@ -131,7 +111,7 @@ class Mock:
                             p["pipeline"] = pipeline(done)
                     if done == len(STEPS):
                         self.processing = [p for p in self.processing if p["meeting_id"] != mid]
-                        self.needs_name.insert(0, self.naming_row(mid, True))
+                        self.broadcast({"event": "meeting_updated", "data": {"id": mid}})
                 self.changed()
                 time.sleep(2.5)
 
@@ -169,10 +149,7 @@ class Mock:
                 self.auto_record = bool(req.get("value"))
             elif cmd in ("rename", "confirm_title"):
                 mid = req.get("id")
-                if not any(n["meeting_id"] == mid for n in self.needs_name):
-                    return {"ok": False, "error": f"no meeting {mid}"}
                 print(f"mock: {cmd} {mid} {req.get('title', '')!r}", flush=True)
-                self.needs_name = [n for n in self.needs_name if n["meeting_id"] != mid]
                 self.broadcast({"event": "meeting_updated", "data": {"id": mid}})
             elif cmd == "mock_set":
                 threading.Thread(target=self.set_state, args=(req["state"],), daemon=True).start()
@@ -259,7 +236,7 @@ def main():
 
     if args.cycle > 0:
         def cycle():
-            order = ["idle", "prompting", "recording", "processing", "needs_name"]
+            order = ["idle", "prompting", "recording", "processing"]
             i = order.index(args.state) if args.state in order else 0
             while True:
                 time.sleep(args.cycle)

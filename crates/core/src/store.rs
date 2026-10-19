@@ -176,14 +176,18 @@ pub fn meetings_in_state(c: &Connection, state: MeetingState) -> Result<Vec<Meet
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// Meetings whose name hasn't been confirmed yet (newest first).
-pub fn needing_name(c: &Connection, limit: usize) -> Result<Vec<Meeting>> {
-    let mut st = c.prepare(&format!(
-        "SELECT {MEETING_COLS} FROM meetings WHERE title_confirmed=0 AND state IN ('processing','ready')
-         ORDER BY started_at DESC LIMIT ?1"
-    ))?;
-    let rows = st.query_map([limit as i64], meeting_from_row)?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+/// Meetings are named automatically once transcribed. Meetings from before that (left
+/// waiting for a name) get their current title confirmed. Returns how many were updated.
+pub fn confirm_pending_titles(c: &Connection) -> Result<usize> {
+    let mut st = c.prepare(&format!("SELECT {MEETING_COLS} FROM meetings WHERE title_confirmed=0"))?;
+    let pending: Vec<Meeting> = st.query_map([], meeting_from_row)?.collect::<rusqlite::Result<_>>()?;
+    pending
+        .iter()
+        .filter(|m| m.state != MeetingState::Recording && m.pipeline.status_of(StepKind::Transcribed) == StepStatus::Done)
+        .try_fold(0, |n, m| {
+            let title = m.title.clone().unwrap_or_else(|| fallback_title(m.app, m.started_at));
+            set_title(c, &m.id, &title, true).map(|_| n + 1)
+        })
 }
 
 pub fn delete_meeting(c: &Connection, id: &str) -> Result<()> {
@@ -363,11 +367,14 @@ mod tests {
         let n = get_notes(&c, &m.id).unwrap();
         assert_eq!((n.user_md.as_str(), n.enhanced.is_some()), ("- ship it", true));
 
-        assert_eq!(needing_name(&c, 5).unwrap().len(), 0); // still recording
+        assert_eq!(confirm_pending_titles(&c).unwrap(), 0); // still recording
         m.state = MeetingState::Ready;
+        m.pipeline = m.pipeline.with(StepKind::Transcribed, StepStatus::Done, None);
         upsert_meeting(&c, &m).unwrap();
-        assert_eq!(needing_name(&c, 5).unwrap().len(), 1);
-        set_title(&c, &m.id, "Trip", true).unwrap();
-        assert_eq!(needing_name(&c, 5).unwrap().len(), 0);
+        assert_eq!(confirm_pending_titles(&c).unwrap(), 1);
+        let got = get_meeting(&c, &m.id).unwrap().unwrap();
+        assert!(got.title_confirmed);
+        assert_eq!(got.title, Some(fallback_title(m.app, m.started_at)));
+        assert_eq!(confirm_pending_titles(&c).unwrap(), 0);
     }
 }

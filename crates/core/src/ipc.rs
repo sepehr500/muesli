@@ -110,24 +110,10 @@ pub struct ProcessingView {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct NeedsNameView {
-    pub meeting_id: MeetingId,
-    /// Current (suggested or fallback) title.
-    pub title: String,
-    pub suggestions: Vec<String>,
-    pub app: Option<App>,
-    pub duration_ms: i64,
-    /// Notes finished too (false while enhancement is still running).
-    pub notes_ready: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Status {
     pub session: SessionView,
     pub auto_record: bool,
     pub processing: Vec<ProcessingView>,
-    /// Most recent first.
-    pub needs_name: Vec<NeedsNameView>,
     /// False when no OpenRouter key is configured.
     pub api_key: bool,
 }
