@@ -27,6 +27,8 @@ pub enum Request {
     Ignore,
     Stop,
     Discard,
+    /// Back-to-back meetings: end the current meeting and keep recording into a new one.
+    Next,
     SetAutoRecord { value: bool },
     /// Set the title; `confirm` marks the naming step done.
     Rename { id: MeetingId, title: String, #[serde(default = "yes")] confirm: bool },

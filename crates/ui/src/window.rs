@@ -734,6 +734,15 @@ impl Win {
                 let w = self.clone();
                 glib::timeout_add_local_once(Duration::from_millis(1400), move || w.toggle_play());
             }
+            "plus" => {
+                let w = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(600), move || {
+                    if let Some(p) = w.plus_pop.ancestor(gtk::Popover::static_type()).and_downcast::<gtk::Popover>() {
+                        p.popup();
+                        *w.demo_target.borrow_mut() = Some(p.upcast());
+                    }
+                });
+            }
             "settings" => {
                 let w = self.clone();
                 glib::timeout_add_local_once(Duration::from_millis(300), move || settings::show(&w.window, || {}));
@@ -969,7 +978,10 @@ impl Win {
         };
         let (title, sub) = match &session {
             None => ("Daemon not running", "Start muesli-daemon to record calls."),
-            Some(SessionView::Recording { .. }) => ("Recording in progress", "Stop to process it, or discard it."),
+            Some(SessionView::Recording { .. }) => (
+                "Recording in progress",
+                "Stop to process it, or start the next meeting without a gap if another one is beginning.",
+            ),
             Some(_) => ("New recording", "Record what you hear and say, right now."),
         };
         self.plus_pop.append(&label(title, &["pop-title"]));
@@ -983,6 +995,7 @@ impl Win {
                     hbox(8, &[]),
                     &[button("Stop", &["primary"], Request::Stop).upcast_ref(), button("Discard", &["skip"], Request::Discard).upcast_ref()],
                 );
+                self.plus_pop.append(&button("Next meeting", &["outline"], Request::Next));
                 self.plus_pop.append(&row);
             }
             Some(_) => self.plus_pop.append(&button("Start recording now", &["primary"], Request::Start)),

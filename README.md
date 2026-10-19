@@ -77,7 +77,7 @@ meeting, not a monthly fee.
 - **Ask your meeting.** "What did we decide about Windows?" Answers come from that meeting's
   notes and transcript, using the model you pick: Claude, GPT, Gemini, Grok, DeepSeek, or
   anything else on OpenRouter.
-- **Lives in your Omarchy bar.** Recording timer, Record / Ignore, Stop / Discard and naming,
+- **Lives in your Omarchy bar.** Recording timer, Record / Ignore, Stop / Next meeting / Discard and naming,
   styled by your current theme.
 - **Featherweight.** The background service idles at about 11 MB of memory and 0% CPU. The app
   is native GTK4 / libadwaita. No Electron, no webview, no muesli account.
@@ -159,9 +159,15 @@ Join a call. A notification and the bar widget show that muesli is recording (or
 if auto-record is off). Hang up, and about a minute later your notes are ready: open them
 from the notification, the bar, or the app launcher (`muesli`).
 
+**Back-to-back meetings:** when one meeting runs straight into the next on the same call,
+press **Next meeting** (in the notification, the bar panel, or the app's **+** menu). muesli
+closes the first meeting and keeps recording into a new one without dropping a second of
+audio; each gets its own notes and title.
+
 ```text
 muesli-cli status | watch [--json]            what's happening now
 muesli-cli toggle | start | stop | discard    control recording
+muesli-cli next                               end this meeting, keep recording the next
 muesli-cli record | ignore                    answer an "ask first" prompt
 muesli-cli auto-record on|off|toggle
 muesli-cli list | show <id> | open [<id>]

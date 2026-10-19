@@ -632,6 +632,14 @@ Panel {
           ActionButton { width: recordButtons.cell; text: "Discard"; onClicked: root.run(["discard"]) }
         }
 
+        // Back-to-back meetings: close this one and keep recording into a new one.
+        ActionButton {
+          visible: root.panelMode === "recording"
+          width: parent.width
+          text: "Next meeting  →"
+          onClicked: root.run(["next"])
+        }
+
         // ---------- naming ----------
         Column {
           visible: root.panelMode === "naming"

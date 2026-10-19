@@ -164,10 +164,15 @@ fn is_live_capture(n: &PwNode) -> bool {
 ///    (Discord/Zoom running as a web app; the audio service pid differs from the window pid,
 ///    so we match on window presence rather than pid).
 pub fn classify(nodes: &[PwNode], windows: &[Window]) -> Option<Candidate> {
+    classify_for(nodes, windows, |_| true)
+}
+
+/// `classify`, considering only the apps `watch` allows (the user can turn apps off).
+pub fn classify_for(nodes: &[PwNode], windows: &[Window], watch: impl Fn(App) -> bool) -> Option<Candidate> {
     let hint_for = |app: App| best_window(app, windows).and_then(|w| title_hint(app, &w.title));
 
     let native = nodes.iter().filter(|n| is_live_capture(n)).find_map(|n| {
-        native_app(&lc(&n.binary), &lc(&n.app_name), &lc(&n.node_name)).map(|app| (app, n.id))
+        native_app(&lc(&n.binary), &lc(&n.app_name), &lc(&n.node_name)).filter(|a| watch(*a)).map(|app| (app, n.id))
     });
     if let Some((app, node_id)) = native {
         return Some(Candidate { app, hint: hint_for(app), node_id });
@@ -176,7 +181,7 @@ pub fn classify(nodes: &[PwNode], windows: &[Window]) -> Option<Candidate> {
     let browser_mic =
         nodes.iter().find(|n| is_live_capture(n) && is_browser(&lc(&n.binary), &lc(&n.app_name)))?;
     // Zoom first: if both windows exist, a Zoom web call is the likelier mic user.
-    [App::Zoom, App::Discord].into_iter().find_map(|app| {
+    [App::Zoom, App::Discord].into_iter().filter(|a| watch(*a)).find_map(|app| {
         best_window(app, windows)
             .map(|w| Candidate { app, hint: title_hint(app, &w.title), node_id: browser_mic.id })
     })
@@ -240,6 +245,17 @@ mod tests {
         let nodes = nodes_from_pw_dump(&fixture("discord-active.json"));
         let windows = vec![Window { class: "google-chrome".into(), title: "Docs".into(), pid: 1 }];
         assert_eq!(classify(&nodes, &windows), None);
+    }
+
+    #[test]
+    fn turned_off_apps_are_skipped() {
+        let nodes = nodes_from_pw_dump(&fixture("discord-active.json"));
+        let mut windows = windows_from_hyprctl(&fixture("discord-active.clients.json"));
+        assert_eq!(classify_for(&nodes, &windows, |a| a != App::Discord), None);
+        // A Zoom tab would normally win; with Zoom off, the Discord call is still found.
+        windows.push(Window { class: "google-chrome".into(), title: "Zoom Meeting - Google Chrome".into(), pid: 2 });
+        assert_eq!(classify(&nodes, &windows).map(|c| c.app), Some(App::Zoom));
+        assert_eq!(classify_for(&nodes, &windows, |a| a != App::Zoom).map(|c| c.app), Some(App::Discord));
     }
 
     #[test]

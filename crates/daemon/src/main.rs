@@ -44,76 +44,102 @@ fn any_live(nodes: &[PwNode]) -> bool {
     nodes.iter().any(|n| !n.corked)
 }
 
-async fn observe(nodes: &[PwNode]) -> Option<detect::Candidate> {
+/// The detector's verdict, minus apps the user turned off in settings.
+async fn observe(ctx: &Ctx, nodes: &[PwNode]) -> Option<detect::Candidate> {
     if !any_live(nodes) {
         return None;
     }
-    detect::classify(nodes, &detector::windows().await)
+    let cfg = ctx.cfg().clone();
+    detect::classify_for(nodes, &detector::windows().await, |a| cfg.app(a).enabled)
 }
 
 fn label(app: Option<detect::App>) -> &'static str {
     app.map(|a| a.label()).unwrap_or("Manual")
 }
 
+/// Create a meeting and start recording it.
+fn begin(ctx: &Ctx, app: Option<detect::App>, hint: Option<String>) -> Result<Active> {
+    let mut m = store::new_meeting(app, hint, store::now_ms());
+    let recorder = tokio::task::block_in_place(|| Recorder::start(&paths::meeting_dir(&m.id)))?;
+    if let Some(a) = app {
+        m.title = None;
+        tracing::info!("recording {} call → {}", a.label(), m.id);
+    }
+    if let Err(e) = ctx.save(&m) {
+        tracing::error!("save meeting: {e}");
+    }
+    Ok(Active { meeting: m, recorder })
+}
+
+/// Stop a recording, then either throw it away or hand it to the post-call pipeline.
+async fn finish(ctx: Arc<Ctx>, a: Active, discard: bool) {
+    let mut m = a.meeting;
+    let info = tokio::task::spawn_blocking(move || a.recorder.stop()).await;
+    if discard {
+        let _ = ctx.db(|c| store::delete_meeting(c, &m.id));
+        let _ = std::fs::remove_dir_all(paths::meeting_dir(&m.id));
+        ctx.meeting_updated(&m.id);
+        tracing::info!("discarded {}", m.id);
+        return;
+    }
+    m.ended_at = Some(match info {
+        Ok(Ok(info)) => {
+            tracing::info!("stopped {} ({:.0}s, {} KB)", m.id, info.duration_s, info.bytes / 1024);
+            m.started_at + (info.duration_s * 1000.0) as i64
+        }
+        other => {
+            tracing::error!("stopping recording failed: {other:?}");
+            store::now_ms()
+        }
+    });
+    m.state = MeetingState::Processing;
+    let _ = ctx.save(&m);
+    tokio::spawn(pipeline::run(ctx.clone(), m.id.clone(), false));
+}
+
+fn start_failed(ctx: &Ctx, e: anyhow::Error, state: &mut State) {
+    tracing::error!("could not start recording: {e:#}");
+    ctx.notifier.info("Couldn't start recording", &format!("{e}"), &[]);
+    *state = State::Idle;
+}
+
 async fn apply(ctx: &Arc<Ctx>, fx: Vec<Effect>, active: &mut Option<Active>, state: &mut State) {
     for e in fx {
         match e {
-            Effect::StartRecording { app, hint, .. } => {
-                let mut m = store::new_meeting(app, hint, store::now_ms());
-                let dir = paths::meeting_dir(&m.id);
-                let started = tokio::task::block_in_place(|| Recorder::start(&dir));
-                match started {
-                    Ok(recorder) => {
-                        if let Some(a) = app {
-                            m.title = None;
-                            tracing::info!("recording {} call → {}", a.label(), m.id);
-                        }
-                        if let Err(e) = ctx.save(&m) {
-                            tracing::error!("save meeting: {e}");
-                        }
-                        *active = Some(Active { meeting: m, recorder });
-                    }
-                    Err(e) => {
-                        tracing::error!("could not start recording: {e:#}");
-                        ctx.notifier.info("Couldn't start recording", &format!("{e}"), &[]);
-                        *state = State::Idle;
-                    }
-                }
-            }
+            Effect::StartRecording { app, hint, .. } => match begin(ctx, app, hint) {
+                Ok(a) => *active = Some(a),
+                Err(e) => start_failed(ctx, e, state),
+            },
             Effect::StopRecording | Effect::DiscardRecording => {
                 ctx.notifier.dismiss();
-                let Some(a) = active.take() else { continue };
-                let discard = matches!(e, Effect::DiscardRecording);
-                let mut m = a.meeting;
-                let info = tokio::task::spawn_blocking(move || a.recorder.stop()).await;
-                if discard {
-                    let _ = ctx.db(|c| store::delete_meeting(c, &m.id));
-                    let _ = std::fs::remove_dir_all(paths::meeting_dir(&m.id));
-                    ctx.meeting_updated(&m.id);
-                    tracing::info!("discarded {}", m.id);
-                    continue;
-                }
-                match info {
-                    Ok(Ok(info)) => {
-                        m.ended_at = Some(m.started_at + (info.duration_s * 1000.0) as i64);
-                        m.state = MeetingState::Processing;
-                        let _ = ctx.save(&m);
-                        tracing::info!("stopped {} ({:.0}s, {} KB)", m.id, info.duration_s, info.bytes / 1024);
-                        tokio::spawn(pipeline::run(ctx.clone(), m.id.clone(), false));
-                    }
-                    other => {
-                        tracing::error!("stopping recording failed: {other:?}");
-                        m.ended_at = Some(store::now_ms());
-                        m.state = MeetingState::Processing;
-                        let _ = ctx.save(&m);
-                        tokio::spawn(pipeline::run(ctx.clone(), m.id.clone(), false));
-                    }
+                if let Some(a) = active.take() {
+                    finish(ctx.clone(), a, matches!(e, Effect::DiscardRecording)).await;
                 }
             }
+            // Start the next meeting's recorder before stopping the old one, so the hand-over
+            // overlaps by a moment instead of dropping audio. The old one finishes in the
+            // background; the session loop doesn't wait for it.
+            Effect::SplitRecording { app, hint, .. } => match begin(ctx, app, hint) {
+                Ok(next) => {
+                    if let Some(prev) = active.replace(next) {
+                        tracing::info!("next meeting: closing {}", prev.meeting.id);
+                        tokio::spawn(finish(ctx.clone(), prev, false));
+                    }
+                }
+                // Couldn't open a new recorder: keep the current one rather than lose audio.
+                Err(e) => {
+                    tracing::error!("could not split recording: {e:#}");
+                    ctx.notifier.info("Couldn't start the next meeting", &format!("{e}. Still recording the current one."), &[]);
+                    if let (Some(a), State::Recording { hint, started, .. }) = (active.as_ref(), &mut *state) {
+                        *hint = a.meeting.hint.clone();
+                        *started = a.meeting.started_at;
+                    }
+                }
+            },
             Effect::Notify(Notice::RecordingStarted { app, hint }) => ctx.notifier.session(
                 &format!("Recording {} call", label(app)),
                 hint.as_deref().unwrap_or("muesli is taking notes"),
-                &[("stop", "Stop"), ("discard", "Discard")],
+                &[("stop", "Stop"), ("next", "Next meeting"), ("discard", "Discard")],
                 false,
             ),
             Effect::Notify(Notice::AskToRecord { app, hint }) => ctx.notifier.session(
@@ -146,12 +172,13 @@ async fn session_loop(
         let event = tokio::select! {
             Some(snap) = nodes_rx.recv() => {
                 nodes = snap;
-                Some(session::Event::Observed { candidate: observe(&nodes).await, now: store::now_ms() })
+                Some(session::Event::Observed { candidate: observe(&ctx, &nodes).await, now: store::now_ms() })
             }
             Some(SessionCmd::Event(e)) = cmd_rx.recv() => Some(e),
             Some(action) = actions_rx.recv() => match action.as_str() {
                 "stop" => Some(session::Event::Stop),
                 "discard" => Some(session::Event::Discard),
+                "next" => Some(session::Event::Next { now: store::now_ms(), candidate: None }),
                 "record" => Some(session::Event::Record { now: store::now_ms() }),
                 "ignore" => Some(session::Event::Ignore),
                 a => {
@@ -166,7 +193,7 @@ async fn session_loop(
             _ = tick.tick(), if session::needs_ticks(&state) => {
                 // Re-observe too: window titles (hints) may have appeared.
                 let now = store::now_ms();
-                let obs = session::Event::Observed { candidate: observe(&nodes).await, now };
+                let obs = session::Event::Observed { candidate: observe(&ctx, &nodes).await, now };
                 let (s, fx) = session::step(state, obs, &ctx.cfg().policy());
                 state = s;
                 apply(&ctx, fx, &mut active, &mut state).await;
@@ -181,6 +208,11 @@ async fn session_loop(
             }
         };
         if let Some(event) = event {
+            // The next meeting gets the detector's current verdict (app + fresh window hint).
+            let event = match event {
+                session::Event::Next { now, .. } => session::Event::Next { now, candidate: observe(&ctx, &nodes).await },
+                e => e,
+            };
             let (s, fx) = session::step(state, event, &ctx.cfg().policy());
             state = s;
             apply(&ctx, fx, &mut active, &mut state).await;

@@ -34,6 +34,8 @@ enum Cmd {
     Stop,
     /// Stop recording and throw it away.
     Discard,
+    /// Back-to-back meetings: end this meeting and keep recording into a new one.
+    Next,
     /// Toggle recording: start if idle/prompting, stop if recording.
     Toggle,
     /// Turn auto-record on/off (persists to config.toml).
@@ -187,6 +189,7 @@ fn main() -> Result<()> {
         Cmd::Ignore => drop(call(Request::Ignore)?),
         Cmd::Stop => drop(call(Request::Stop)?),
         Cmd::Discard => drop(call(Request::Discard)?),
+        Cmd::Next => drop(call(Request::Next)?),
         Cmd::Toggle => {
             let req = match status()?.session {
                 SessionView::Recording { .. } => Request::Stop,

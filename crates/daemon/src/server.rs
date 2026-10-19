@@ -84,6 +84,8 @@ async fn handle(ctx: &Arc<Ctx>, req: Request) -> Result<Response> {
         Request::Ignore => session(ctx, session::Event::Ignore),
         Request::Stop => session(ctx, session::Event::Stop),
         Request::Discard => session(ctx, session::Event::Discard),
+        // The session loop fills in the detector's current verdict.
+        Request::Next => session(ctx, session::Event::Next { now, candidate: None }),
         Request::SetAutoRecord { value } => {
             let cfg = {
                 let mut c = ctx.cfg.write().expect("cfg");

@@ -57,6 +57,9 @@ pub enum Event {
     Start { now: Millis },
     Stop,
     Discard,
+    /// Back-to-back meetings: close the current meeting here and keep recording into a new
+    /// one. `candidate` is the detector's latest verdict, for the new meeting's app and hint.
+    Next { now: Millis, candidate: Option<Candidate> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -71,6 +74,8 @@ pub enum Effect {
     StartRecording { app: Option<App>, hint: Option<String>, started: Millis },
     StopRecording,
     DiscardRecording,
+    /// Finish the current meeting and start a new one without a gap in the audio.
+    SplitRecording { app: Option<App>, hint: Option<String>, started: Millis },
     Notify(Notice),
 }
 
@@ -192,6 +197,22 @@ pub fn step(state: State, event: Event, p: &Policy) -> (State, Vec<Effect>) {
         (S::Recording { app, call_present, .. }, E::Discard) => {
             end_recording(app, call_present, Effect::DiscardRecording)
         }
+        (S::Recording { app, manual, gone_since, .. }, E::Next { now, candidate }) => {
+            // The new meeting takes the current call's app and a fresh hint (the old hint
+            // named the previous meeting). If the call is already gone, the next one gets a
+            // full grace period to show up.
+            let app = candidate.as_ref().map(|c| c.app).or(app);
+            let hint = candidate.as_ref().and_then(|c| c.hint.clone());
+            let present = candidate.is_some();
+            let gone_since = gone_since.map(|_| now).filter(|_| !present);
+            (
+                S::Recording { app, hint: hint.clone(), started: now, manual, call_present: present, gone_since },
+                vec![
+                    Effect::SplitRecording { app, hint: hint.clone(), started: now },
+                    Effect::Notify(Notice::RecordingStarted { app, hint }),
+                ],
+            )
+        }
 
         // ---- Ignored
         (S::Ignored { .. }, E::Observed { candidate: None, .. }) => (S::Idle, vec![]),
@@ -311,6 +332,55 @@ mod tests {
         let p = Policy { auto_record: true, per_app: vec![(App::Discord, false)], ..Default::default() };
         let (s, _) = run(&p, vec![obs(Some(App::Discord), 0), Event::Tick { now: 5_000 }]);
         assert!(matches!(s, State::Prompting { .. }));
+    }
+
+    #[test]
+    fn next_splits_without_leaving_recording() {
+        let p = Policy::default();
+        let (s, _) = run(&p, vec![obs(Some(App::Zoom), 0), Event::Tick { now: 5_000 }]);
+        let next = Candidate { app: App::Zoom, hint: Some("Design sync".into()), node_id: 3 };
+        let (s, fx) = step(s, Event::Next { now: 60_000, candidate: Some(next) }, &p);
+        assert_eq!(
+            s,
+            State::Recording {
+                app: Some(App::Zoom),
+                hint: Some("Design sync".into()),
+                started: 60_000,
+                manual: false,
+                call_present: true,
+                gone_since: None,
+            }
+        );
+        assert_eq!(
+            fx[0],
+            Effect::SplitRecording { app: Some(App::Zoom), hint: Some("Design sync".into()), started: 60_000 }
+        );
+        assert!(!fx.contains(&Effect::StopRecording));
+    }
+
+    #[test]
+    fn next_after_call_ended_restarts_grace() {
+        let p = Policy::default();
+        let (s, _) = run(
+            &p,
+            vec![obs(Some(App::Zoom), 0), Event::Tick { now: 5_000 }, obs(None, 50_000)],
+        );
+        // 15 s into the 20 s grace, the user says the next meeting is starting.
+        let (s, _) = step(s, Event::Next { now: 65_000, candidate: None }, &p);
+        assert!(matches!(s, State::Recording { gone_since: Some(65_000), app: Some(App::Zoom), hint: None, .. }));
+        let (s, fx) = step(s, Event::Tick { now: 75_000 }, &p);
+        assert!(fx.is_empty(), "old grace must not end the new meeting");
+        let (s, _) = step(s, obs(Some(App::Zoom), 80_000), &p);
+        assert!(matches!(s, State::Recording { gone_since: None, .. }));
+    }
+
+    #[test]
+    fn next_is_a_noop_when_not_recording() {
+        let p = Policy::default();
+        let e = Event::Next { now: 1, candidate: None };
+        assert_eq!(step(State::Idle, e.clone(), &p), (State::Idle, vec![]));
+        let ignored = State::Ignored { app: App::Discord };
+        assert_eq!(step(ignored.clone(), e, &p), (ignored, vec![]));
     }
 
     #[test]
