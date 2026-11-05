@@ -64,12 +64,36 @@ pub fn parse_titles(s: &str) -> Vec<String> {
 pub const DEFAULT_TEMPLATE: &str = "Sections to use when relevant (omit empty ones): \
 \"Decisions\", \"Discussion\", \"Open questions\". Put to-dos in action_items, not in sections.";
 
+/// Who is in the transcript, beyond the raw labels the model should try to name.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct KnownSpeakers {
+    /// Names already shown in the transcript (imported per-speaker tracks). Exact; never renamed.
+    pub names: Vec<String>,
+    /// False when there is no "You" (microphone) channel, e.g. an imported recording.
+    pub no_you: bool,
+}
+
 pub fn enhance_messages(
     transcript: &str,
     user_notes: &str,
     template: &str,
     speaker_labels: &[String],
+    known: &KnownSpeakers,
 ) -> Vec<Message> {
+    let named = match known.names.is_empty() {
+        true => String::new(),
+        false => format!(
+            "\nThese participants are shown by name and identified from their own audio: {}. Use exactly \
+             these names and never rename them.",
+            known.names.join(", ")
+        ),
+    };
+    let no_you = match known.no_you {
+        true => "\nThis recording has no \"You\" channel: every speaker appears by name or label. Never use \
+                 \"You\" as a speaker or owner."
+            .to_string(),
+        false => String::new(),
+    };
     let labels = match speaker_labels.is_empty() {
         true => String::new(),
         false => format!(
@@ -93,7 +117,7 @@ pub fn enhance_messages(
              - Never invent facts not supported by the transcript.\n\
              - Never write the bracketed labels (like c0s1) in notes or owners. Use a person's real name when \
                the transcript makes it clear, otherwise a neutral phrase such as \"a participant\".\n\
-             {template}{labels}\n\
+             {template}{labels}{named}{no_you}\n\
              - Transcript lines are numbered (#12). For every item and action item, list in \"sources\" the \
                1-3 line numbers that most directly support it. Use [] only for a user point the transcript \
                never mentions.\n\

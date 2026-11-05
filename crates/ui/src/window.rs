@@ -1753,7 +1753,7 @@ impl Win {
                 _ => Message::user(c.content),
             })
             .collect();
-        let msgs = prompts::ask_messages(&q, &transcript::render_for_prompt(&segs), &notes_md, &history);
+        let msgs = prompts::ask_messages(&q, &transcript::render_for_prompt(&segs, &m.speaker_names), &notes_md, &history);
         let _ = store::add_chat(&self.db, &m.id, "user", &q);
         self.ask_entry.set_text("");
         self.thread.append(&chat_label("user", &q));

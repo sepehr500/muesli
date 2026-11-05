@@ -59,6 +59,16 @@ CREATE TABLE IF NOT EXISTS chats (
     content    TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+
+-- Recordings imported from outside muesli (e.g. a Discord bot). `source_id` makes imports
+-- idempotent; `speakers` keeps the known per-track names for reprocessing and renames.
+CREATE TABLE IF NOT EXISTS imports (
+    source_id  TEXT PRIMARY KEY,
+    meeting_id TEXT NOT NULL UNIQUE REFERENCES meetings(id) ON DELETE CASCADE,
+    speakers   TEXT NOT NULL,
+    manifest   TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
 "#;
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -311,6 +321,36 @@ pub fn search(c: &Connection, query: &str, limit: usize) -> Result<Vec<MeetingId
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// The meeting a `source_id` was imported as, if any.
+pub fn import_meeting(c: &Connection, source_id: &str) -> Result<Option<MeetingId>> {
+    Ok(c.query_row("SELECT meeting_id FROM imports WHERE source_id=?1", [source_id], |r| r.get(0)).optional()?)
+}
+
+/// Speakers of an imported meeting (empty for normal recordings).
+pub fn import_speakers(c: &Connection, meeting_id: &str) -> Result<Vec<crate::import::ImportSpeaker>> {
+    let json: Option<String> =
+        c.query_row("SELECT speakers FROM imports WHERE meeting_id=?1", [meeting_id], |r| r.get(0)).optional()?;
+    Ok(json.map(|j| serde_json::from_str(&j)).transpose()?.unwrap_or_default())
+}
+
+/// Create an imported meeting and claim its `source_id`, atomically.
+pub fn insert_import(
+    c: &mut Connection,
+    m: &Meeting,
+    source_id: &str,
+    speakers: &[crate::import::ImportSpeaker],
+    manifest: &str,
+) -> Result<()> {
+    let tx = c.transaction()?;
+    upsert_meeting(&tx, m)?;
+    tx.execute(
+        "INSERT INTO imports (source_id, meeting_id, speakers, manifest, created_at) VALUES (?1,?2,?3,?4,?5)",
+        params![source_id, m.id, serde_json::to_string(speakers)?, manifest, now_ms()],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn new_meeting(app: Option<App>, hint: Option<String>, started_at: i64) -> Meeting {
     Meeting {
         id: ulid::Ulid::generate().to_string().to_lowercase(),
@@ -376,5 +416,24 @@ mod tests {
         assert!(got.title_confirmed);
         assert_eq!(got.title, Some(fallback_title(m.app, m.started_at)));
         assert_eq!(confirm_pending_titles(&c).unwrap(), 0);
+    }
+
+    #[test]
+    fn imports_are_unique_and_follow_deletes() {
+        use crate::import::ImportSpeaker;
+        let mut c = mem();
+        c.pragma_update(None, "foreign_keys", "ON").unwrap();
+        let m = new_meeting(Some(App::Discord), None, 1000);
+        let sp = vec![ImportSpeaker { label: "t0".into(), name: Some("Matt Rosenthal".into()) }];
+        insert_import(&mut c, &m, "discord:1:a", &sp, "{}").unwrap();
+        assert_eq!(import_meeting(&c, "discord:1:a").unwrap(), Some(m.id.clone()));
+        assert_eq!(import_speakers(&c, &m.id).unwrap(), sp);
+        // Same source again: rejected, and the meeting row is rolled back with it.
+        let other = new_meeting(Some(App::Discord), None, 2000);
+        assert!(insert_import(&mut c, &other, "discord:1:a", &sp, "{}").is_err());
+        assert!(get_meeting(&c, &other.id).unwrap().is_none());
+        assert!(import_speakers(&c, &other.id).unwrap().is_empty());
+        delete_meeting(&c, &m.id).unwrap();
+        assert_eq!(import_meeting(&c, "discord:1:a").unwrap(), None);
     }
 }

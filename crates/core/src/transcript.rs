@@ -310,7 +310,8 @@ pub fn display_speaker(s: &Speaker, names: &std::collections::BTreeMap<String, S
     match s {
         Speaker::Me => "You".into(),
         Speaker::Them(l) => names.get(l).cloned().unwrap_or_else(|| {
-            let n = l.rsplit('s').next().unwrap_or("0");
+            // Trailing number of the label: "c1s2" → 2, imported track "t0" → 0.
+            let n = l.rsplit(|c: char| !c.is_ascii_digit()).next().unwrap_or("0");
             match n.parse::<u32>() {
                 Ok(i) => format!("Speaker {}", i + 1),
                 Err(_) => format!("Speaker {n}"),
@@ -358,33 +359,34 @@ pub fn other_speaker_count(segs: &[Segment], names: &std::collections::BTreeMap<
     v.len()
 }
 
+/// Speaker for prompts: "You", a name from `names`, or the raw label in brackets ("[c0s1]").
+fn prompt_speaker(s: &Speaker, names: &std::collections::BTreeMap<String, String>) -> String {
+    match s {
+        Speaker::Me => "You".to_string(),
+        Speaker::Them(l) => names.get(l).cloned().unwrap_or_else(|| format!("[{l}]")),
+    }
+}
+
 /// Transcript with line numbers for citing: "#12 [03:12] You: ...". Line numbers are segment
-/// indices, so cited sources map straight back to transcript lines.
-pub fn render_numbered(segs: &[Segment]) -> String {
+/// indices, so cited sources map straight back to transcript lines. Labels in `names` are
+/// shown by name; the rest as raw labels.
+pub fn render_numbered(segs: &[Segment], names: &std::collections::BTreeMap<String, String>) -> String {
     segs.iter()
         .enumerate()
         .map(|(i, s)| {
             let t = s.t_start.max(0.0) as u64;
-            let who = match &s.speaker {
-                Speaker::Me => "You".to_string(),
-                Speaker::Them(l) => format!("[{l}]"),
-            };
-            format!("#{i} [{:02}:{:02}] {who}: {}", t / 60, t % 60, s.text)
+            format!("#{i} [{:02}:{:02}] {}: {}", t / 60, t % 60, prompt_speaker(&s.speaker, names), s.text)
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-/// Plain-text transcript for prompts: "[03:12] You: ..." (raw labels for Them).
-pub fn render_for_prompt(segs: &[Segment]) -> String {
+/// Plain-text transcript for prompts: "[03:12] You: ..." (names from `names`, else raw labels).
+pub fn render_for_prompt(segs: &[Segment], names: &std::collections::BTreeMap<String, String>) -> String {
     segs.iter()
         .map(|s| {
             let t = s.t_start.max(0.0) as u64;
-            let who = match &s.speaker {
-                Speaker::Me => "You".to_string(),
-                Speaker::Them(l) => format!("[{l}]"),
-            };
-            format!("[{:02}:{:02}] {who}: {}", t / 60, t % 60, s.text)
+            format!("[{:02}:{:02}] {}: {}", t / 60, t % 60, prompt_speaker(&s.speaker, names), s.text)
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -558,5 +560,9 @@ mod tests {
         ];
         assert_eq!(other_speaker_count(&segs, &names), 2);
         assert_eq!(display_speaker(&Speaker::Them("c1s1".into()), &names), "Speaker 2");
+        assert_eq!(display_speaker(&Speaker::Them("t3".into()), &names), "Speaker 4");
+        let known = [("t0".to_string(), "Matt Rosenthal".to_string())].into();
+        let segs = vec![seg(Speaker::Them("t0".into()), 61.0, 62.0, "hi"), seg(Speaker::Them("c0s1".into()), 63.0, 64.0, "yo")];
+        assert_eq!(render_numbered(&segs, &known), "#0 [01:01] Matt Rosenthal: hi\n#1 [01:03] [c0s1]: yo");
     }
 }

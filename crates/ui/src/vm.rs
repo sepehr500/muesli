@@ -93,8 +93,15 @@ pub fn people_line(segs: &[Segment], names: &BTreeMap<String, String>) -> Option
         }
         v
     });
+    // Imported recordings have no "You" channel: just the people.
+    let has_you = segs.iter().any(|s| s.speaker == Speaker::Me);
     Some(match (others.is_empty(), all_named && named.len() <= 4) {
         (true, _) => "Just you".into(),
+        (false, true) if !has_you => named.join(", "),
+        (false, false) if !has_you => match other_speaker_count(segs, names) {
+            1 => "1 speaker".into(),
+            n => format!("{n} speakers"),
+        },
         (false, true) => format!("{}, you", named.join(", ")),
         (false, false) => match other_speaker_count(segs, names) {
             1 => "You + 1 other".into(),
@@ -460,6 +467,10 @@ mod tests {
         assert_eq!(people_line(&segs, &names).unwrap(), "Lena, Marco, you");
         assert_eq!(people_line(&[seg(Speaker::Me)], &names).unwrap(), "Just you");
         assert_eq!(people_line(&[], &names), None);
+        let imported = vec![them("t0"), them("t1")];
+        let known: BTreeMap<String, String> = [("t0".into(), "Matt Rosenthal".into()), ("t1".into(), "Lena".into())].into();
+        assert_eq!(people_line(&imported, &known).unwrap(), "Matt Rosenthal, Lena");
+        assert_eq!(people_line(&imported, &BTreeMap::new()).unwrap(), "2 speakers");
     }
 
     #[test]

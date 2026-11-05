@@ -174,6 +174,7 @@ muesli-cli list | show <id> | open [<id>]
 muesli-cli rename <id> "Title"
 muesli-cli rename-speaker <id> "Speaker 2" "Lena"
 muesli-cli reprocess <id> | enhance <id> | delete <id>
+muesli-cli import --manifest /abs/import.json --json   add an external recording (docs/import.md)
 muesli-cli detect                             debug: what the call detector sees
 ```
 

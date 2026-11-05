@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod detect;
+pub mod import;
 pub mod ipc;
 pub mod model;
 pub mod openrouter;

@@ -132,6 +132,10 @@ async fn handle(ctx: &Arc<Ctx>, req: Request) -> Result<Response> {
             let segs = ctx.db(|c| store::segments(c, &id))?;
             let names = transcript::rename_speaker(&segs, &m.speaker_names, &from, to)
                 .ok_or_else(|| anyhow::anyhow!("nobody called \"{from}\" in this transcript"))?;
+            // Imported tracks: resetting a name goes back to the manifest's name.
+            let import_speakers = ctx.db(|c| store::import_speakers(c, &id))?;
+            let known = crate::pipeline::known_names(&import_speakers, &names);
+            let names: std::collections::BTreeMap<String, String> = names.into_iter().chain(known).collect();
             // Notes mention people by the name shown at the time; follow the rename there too.
             let shown = |names: &std::collections::BTreeMap<String, String>| {
                 segs.iter()
@@ -146,9 +150,9 @@ async fn handle(ctx: &Arc<Ctx>, req: Request) -> Result<Response> {
                 ctx.db(|c| store::set_enhanced(c, &id, Some(&enh)))?;
             }
             m.speaker_names = names;
-            let others = transcript::other_speaker_count(&segs, &m.speaker_names);
             if m.pipeline.status_of(StepKind::Transcribed) == StepStatus::Done {
-                let detail = format!("{} · cost ${:.2}", crate::pipeline::others_phrase(others), m.cost_usd);
+                let people = crate::pipeline::people_phrase(&segs, &m.speaker_names, !import_speakers.is_empty());
+                let detail = format!("{people} · cost ${:.2}", m.cost_usd);
                 m.pipeline = std::mem::take(&mut m.pipeline).with(StepKind::Transcribed, StepStatus::Done, Some(detail));
             }
             ctx.save(&m)?;
@@ -177,6 +181,7 @@ async fn handle(ctx: &Arc<Ctx>, req: Request) -> Result<Response> {
             ctx.meeting_updated(&id);
             Ok(Response::empty())
         }
+        Request::Import { manifest } => Ok(Response::ok(crate::import::import(ctx, manifest).await?)),
         Request::ReloadConfig => {
             *ctx.cfg.write().expect("cfg") = config::Config::load();
             ctx.broadcast_status();

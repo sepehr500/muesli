@@ -46,6 +46,21 @@ pub struct RecordingInfo {
     pub mic_segments: Vec<String>,
     pub sys_segments: Vec<String>,
     pub bytes: u64,
+    /// Imported recordings (e.g. a Discord bot): one track per known speaker instead of mic/sys.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tracks: Vec<TrackInfo>,
+}
+
+/// One imported track, segmented like mic/sys and aligned to meeting start: segment `k` of
+/// every track covers the same time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackInfo {
+    /// Speaker label: "t0" for a known speaker, "m0" for a mixed (diarized) track.
+    pub label: String,
+    /// Display name, e.g. "Matt Rosenthal"; None for a mixed track.
+    #[serde(default)]
+    pub name: Option<String>,
+    pub segments: Vec<String>,
 }
 
 impl RecordingInfo {
@@ -70,7 +85,7 @@ impl RecordingInfo {
             .and_then(|last| crate::oggopus::decode_file(&raw_dir.join(last), 16_000).ok())
             .map(|tail| (mic.len().saturating_sub(1) * SEGMENT_SECS as usize) as f64 + tail.len() as f64 / 16_000.0)
             .unwrap_or(0.0);
-        Ok(RecordingInfo { rate: RATE, segment_secs: SEGMENT_SECS, duration_s, mic_segments: mic, sys_segments: sys, bytes })
+        Ok(RecordingInfo { rate: RATE, segment_secs: SEGMENT_SECS, duration_s, mic_segments: mic, sys_segments: sys, bytes, tracks: vec![] })
     }
 }
 
@@ -306,6 +321,7 @@ impl Recorder {
             mic_segments: vec![],
             sys_segments: vec![],
             bytes: 0,
+            tracks: vec![],
         };
         for w in std::mem::take(&mut self.writers) {
             let (ch, names, samples) = w.join().map_err(|_| anyhow!("writer panicked"))??;

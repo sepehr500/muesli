@@ -24,6 +24,8 @@ pub struct Ctx {
     pub session_view: RwLock<SessionView>,
     pub cmds: mpsc::UnboundedSender<SessionCmd>,
     pub jobs: Mutex<HashSet<String>>,
+    /// Serializes imports (source_id check + claim).
+    pub imports: tokio::sync::Mutex<()>,
     pub notifier: crate::notify::Notifier,
 }
 

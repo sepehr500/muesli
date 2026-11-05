@@ -3,19 +3,22 @@
 
 use crate::ctx::Ctx;
 use anyhow::{Context, Result, anyhow};
-use muesli_audio::capture::RecordingInfo;
 use muesli_audio::clean::{CleanOptions, clean};
 use muesli_core::model::*;
 use muesli_core::openrouter::Client;
 use muesli_core::transcript::{self, TimeMap};
-use muesli_core::{config, paths, prompts, store};
+use muesli_core::{config, import, paths, prompts, store};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ChunkRecord {
     me: bool,
+    /// Imported named track: every line in this chunk is this speaker label (no diarization).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    track: Option<String>,
     file: String,
     map: TimeMap,
     speech_s: f64,
@@ -35,6 +38,29 @@ pub fn others_phrase(n: usize) -> String {
         1 => "You and 1 other".into(),
         n => format!("You and {n} others"),
     }
+}
+
+/// "You and 2 others", or for imported recordings (no "You" channel) "3 speakers".
+pub fn people_phrase(segs: &[Segment], names: &BTreeMap<String, String>, imported: bool) -> String {
+    let n = transcript::other_speaker_count(segs, names);
+    match (imported, n) {
+        (false, n) => others_phrase(n),
+        (true, 1) => "1 speaker".into(),
+        (true, n) => format!("{n} speakers"),
+    }
+}
+
+/// Known names of an imported meeting's tracks (label → name). A name the user gave a
+/// track (`current`) wins over the manifest name, so renames survive reprocessing; a reset
+/// rename falls back to the manifest name. Empty for normal recordings.
+pub fn known_names(speakers: &[import::ImportSpeaker], current: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    import::known_names(speakers)
+        .into_iter()
+        .map(|(label, name)| {
+            let name = current.get(&label).cloned().unwrap_or(name);
+            (label, name)
+        })
+        .collect()
 }
 
 /// Like `human_duration`, but seconds under a minute ("45 s").
@@ -118,12 +144,17 @@ async fn steps(ctx: &Arc<Ctx>, id: &str, enhance_only: bool) -> Result<()> {
     // 1. Saved
     if m.pipeline.status_of(StepKind::Saved) != StepStatus::Done {
         let raw2 = raw.clone();
-        let info = tokio::task::spawn_blocking(move || RecordingInfo::load(&raw2).or_else(|_| RecordingInfo::scan(&raw2)))
-            .await??;
+        // Imports: converts the staged copies into raw tracks first (restartable).
+        let info = tokio::task::spawn_blocking(move || muesli_audio::import::recording_info(&raw2)).await??;
         if m.ended_at.is_none() {
             m.ended_at = Some(m.started_at + (info.duration_s * 1000.0) as i64);
         }
-        let detail = format!("{} of you and the call, kept on this computer", lower_duration(m.duration_ms().unwrap_or(0)));
+        let dur = lower_duration(m.duration_ms().unwrap_or(0));
+        let detail = match info.tracks.len() {
+            0 => format!("{dur} of you and the call, kept on this computer"),
+            1 => format!("{dur} imported, kept on this computer"),
+            n => format!("{dur} imported in {n} tracks, kept on this computer"),
+        };
         set_step(ctx, &mut m, StepKind::Saved, StepStatus::Done, Some(detail)).await?;
     }
 
@@ -146,8 +177,19 @@ async fn steps(ctx: &Arc<Ctx>, id: &str, enhance_only: bool) -> Result<()> {
         let chunks = r
             .mic_chunks
             .iter()
-            .map(|c| ChunkRecord { me: true, file: rel(&c.path), map: c.map.clone(), speech_s: c.speech_s })
-            .chain(r.sys_chunks.iter().map(|c| ChunkRecord { me: false, file: rel(&c.path), map: c.map.clone(), speech_s: c.speech_s }))
+            .map(|c| ChunkRecord { me: true, track: None, file: rel(&c.path), map: c.map.clone(), speech_s: c.speech_s })
+            .chain(r.sys_chunks.iter().map(|c| ChunkRecord { me: false, track: None, file: rel(&c.path), map: c.map.clone(), speech_s: c.speech_s }))
+            .chain(r.track_chunks.iter().flat_map(|t| {
+                // Named tracks keep their label; mixed tracks are diarized like the call channel.
+                let track = t.name.as_ref().map(|_| t.label.clone());
+                t.chunks.iter().map(move |c| ChunkRecord {
+                    me: false,
+                    track: track.clone(),
+                    file: rel(&c.path),
+                    map: c.map.clone(),
+                    speech_s: c.speech_s,
+                })
+            }))
             .collect();
         let manifest = CleanManifest { chunks, silence_s: r.silence_s, duration_s: r.duration_s, echo_cancelled: r.echo_cancelled };
         std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
@@ -161,6 +203,8 @@ async fn steps(ctx: &Arc<Ctx>, id: &str, enhance_only: bool) -> Result<()> {
         set_step(ctx, &mut m, StepKind::Cleaned, StepStatus::Done, Some(detail)).await?;
     }
     let manifest: CleanManifest = serde_json::from_str(&std::fs::read_to_string(&manifest_path)?)?;
+    let import_speakers = ctx.db(|c| store::import_speakers(c, id))?;
+    let imported = !import_speakers.is_empty();
 
     // 3. Transcribed (+ title suggestions)
     if m.pipeline.status_of(StepKind::Transcribed) != StepStatus::Done {
@@ -169,10 +213,11 @@ async fn steps(ctx: &Arc<Ctx>, id: &str, enhance_only: bool) -> Result<()> {
         let (segs, cost) = transcribe_all(&client, &cfg, &clean_dir, &manifest).await?;
         ctx.db(|c| store::replace_segments(c, id, &segs))?;
         m.cost_usd += cost;
-        let others = transcript::other_speaker_count(&segs, &m.speaker_names);
+        let known = known_names(&import_speakers, &ctx.meeting(id)?.speaker_names);
+        m.speaker_names.extend(known.clone());
         let detail = match segs.is_empty() {
             true => "No speech detected".to_string(),
-            false => format!("{} · cost ${:.2}", others_phrase(others), m.cost_usd),
+            false => format!("{} · cost ${:.2}", people_phrase(&segs, &m.speaker_names, imported), m.cost_usd),
         };
         // Title suggestions (fast model). Failure here isn't fatal.
         if !segs.is_empty() && !m.title_confirmed {
@@ -180,7 +225,7 @@ async fn steps(ctx: &Arc<Ctx>, id: &str, enhance_only: bool) -> Result<()> {
             let msgs = prompts::title_messages(
                 m.app.map(|a| a.label()).unwrap_or("Meeting"),
                 m.hint.as_deref(),
-                &transcript::render_for_prompt(&segs),
+                &transcript::render_for_prompt(&segs, &known),
                 &notes,
             );
             match client.chat(&cfg.openrouter.chat_model, &msgs, true).await {
@@ -212,17 +257,25 @@ async fn steps(ctx: &Arc<Ctx>, id: &str, enhance_only: bool) -> Result<()> {
             set_step(ctx, &mut m, StepKind::Notes, StepStatus::Done, Some("Nothing to write up".into())).await?;
         } else {
             let client = Client::from_config(&cfg).context("Add an OpenRouter key in Settings")?;
+            // Imported tracks are named deterministically; the model only names the rest.
+            let known = known_names(&import_speakers, &ctx.meeting(id)?.speaker_names);
             let mut labels: Vec<String> = segs
                 .iter()
                 .filter_map(|s| match &s.speaker {
-                    Speaker::Them(l) => Some(l.clone()),
-                    Speaker::Me => None,
+                    Speaker::Them(l) if !known.contains_key(l) => Some(l.clone()),
+                    _ => None,
                 })
                 .collect();
             labels.sort();
             labels.dedup();
+            let mut known_list: Vec<String> = known.values().cloned().collect();
+            known_list.dedup();
+            let who = prompts::KnownSpeakers {
+                names: known_list,
+                no_you: imported && !segs.iter().any(|s| s.speaker == Speaker::Me),
+            };
             let template = load_template();
-            let msgs = prompts::enhance_messages(&transcript::render_numbered(&segs), &notes.user_md, &template, &labels);
+            let msgs = prompts::enhance_messages(&transcript::render_numbered(&segs, &known), &notes.user_md, &template, &labels, &who);
             // Models occasionally return malformed JSON; one fresh attempt usually fixes it.
             let mut parsed = None;
             for attempt in 1..=2 {
@@ -236,16 +289,16 @@ async fn steps(ctx: &Arc<Ctx>, id: &str, enhance_only: bool) -> Result<()> {
                 tracing::warn!("notes reply {attempt}/2 unreadable: {head:?}");
             }
             let (enhanced, speakers) = parsed.ok_or_else(|| anyhow!("the notes model returned something unreadable"))?;
+            let speakers = merge_names(speakers, &known);
             let enhanced = prompts::validate_sources(prompts::scrub_labels(enhanced, &speakers), segs.len());
             ctx.db(|c| store::set_enhanced(c, id, Some(&enhanced)))?;
             m.speaker_names = speakers;
             // Refresh the transcript detail with linked names.
-            let others = transcript::other_speaker_count(&segs, &m.speaker_names);
             if !segs.is_empty() {
                 m.pipeline = std::mem::take(&mut m.pipeline).with(
                     StepKind::Transcribed,
                     StepStatus::Done,
-                    Some(format!("{} · cost ${:.2}", others_phrase(others), m.cost_usd)),
+                    Some(format!("{} · cost ${:.2}", people_phrase(&segs, &m.speaker_names, imported), m.cost_usd)),
                 );
             }
             let points: usize = enhanced.sections.iter().map(|s| s.items.len()).sum();
@@ -262,6 +315,11 @@ async fn steps(ctx: &Arc<Ctx>, id: &str, enhance_only: bool) -> Result<()> {
         ctx.notifier.info("Notes ready", &m.display_title(), &[(&format!("open:{id}"), "Open notes")]);
     }
     Ok(())
+}
+
+/// The model's speaker linking plus the known names, which it can never override.
+fn merge_names(linked: BTreeMap<String, String>, known: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    linked.into_iter().filter(|(l, _)| !known.contains_key(l)).chain(known.clone()).collect()
 }
 
 fn load_template() -> String {
@@ -297,6 +355,11 @@ async fn transcribe_all(
             };
             tracing::info!("chunk {} ({:.0}s speech) → {} via {}", c.file, c.speech_s, reply.text.len(), reply.model);
             let segs = transcript::segments_from_stt(&reply.text, &reply.segments, &reply.words, &c.map, c.me, i);
+            // One person per imported track: ignore any diarization inside it.
+            let segs: Vec<Segment> = match &c.track {
+                Some(label) => segs.into_iter().map(|s| Segment { speaker: Speaker::Them(label.clone()), ..s }).collect(),
+                None => segs,
+            };
             anyhow::Ok((c.me, segs, reply.cost))
         })
     });
@@ -320,4 +383,46 @@ async fn futures_join<T>(handles: Vec<tokio::task::JoinHandle<T>>) -> Vec<Result
         out.push(h.await);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use muesli_core::import::ImportSpeaker;
+
+    fn names(v: &[(&str, &str)]) -> BTreeMap<String, String> {
+        v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+    }
+
+    #[test]
+    fn known_track_names_beat_the_model_and_keep_user_renames() {
+        let sp = |l: &str, n: Option<&str>| ImportSpeaker { label: l.into(), name: n.map(Into::into) };
+        let speakers = [sp("t0", Some("Matt Rosenthal")), sp("t1", Some("Lena")), sp("m0", None)];
+        // The user renamed Lena; t0 has no current entry (e.g. reset) → manifest name.
+        let known = known_names(&speakers, &names(&[("t1", "Lena K"), ("c3s0", "Bob")]));
+        assert_eq!(known, names(&[("t0", "Matt Rosenthal"), ("t1", "Lena K")]));
+        // The model tries to rename a known track and links a diarized label.
+        let merged = merge_names(names(&[("t0", "Matthew"), ("c3s1", "Priya")]), &known);
+        assert_eq!(merged, names(&[("c3s1", "Priya"), ("t0", "Matt Rosenthal"), ("t1", "Lena K")]));
+        assert!(known_names(&[], &names(&[("c0s0", "X")])).is_empty(), "normal recordings: nothing known");
+    }
+
+    #[test]
+    fn people_phrase_for_imports() {
+        let seg = |l: &str| Segment { speaker: Speaker::Them(l.into()), t_start: 0.0, t_end: 1.0, text: "hi".into() };
+        let segs = [seg("t0"), seg("t1"), seg("t0")];
+        assert_eq!(people_phrase(&segs, &names(&[("t0", "A"), ("t1", "B")]), true), "2 speakers");
+        assert_eq!(people_phrase(&segs[..1], &BTreeMap::new(), true), "1 speaker");
+        assert_eq!(people_phrase(&segs, &BTreeMap::new(), false), "You and 2 others");
+    }
+
+    #[test]
+    fn chunk_records_stay_readable() {
+        // Old manifests (no `track`) still parse; named tracks round-trip.
+        let old: ChunkRecord = serde_json::from_str(r#"{"me":false,"file":"sys-000.opus","map":{"spans":[]},"speech_s":1.0}"#).unwrap();
+        assert_eq!(old.track, None);
+        let new = ChunkRecord { track: Some("t0".into()), ..old };
+        let back: ChunkRecord = serde_json::from_str(&serde_json::to_string(&new).unwrap()).unwrap();
+        assert_eq!(back.track.as_deref(), Some("t0"));
+    }
 }

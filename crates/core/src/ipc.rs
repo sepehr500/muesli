@@ -48,6 +48,10 @@ pub enum Request {
     PreparePlayback { id: MeetingId },
     /// The daemon reloads config.toml.
     ReloadConfig,
+    /// Import an external recording described by an `import.json` manifest (absolute path;
+    /// see `crate::import`). Replies with `ImportReply` once the audio is copied into muesli's
+    /// storage; processing continues in the background. Idempotent per `source_id`.
+    Import { manifest: std::path::PathBuf },
 }
 
 fn yes() -> bool {
@@ -158,6 +162,8 @@ mod tests {
         assert_eq!(serde_json::to_string(&Request::Status).unwrap(), r#"{"cmd":"status"}"#);
         let r: Request = serde_json::from_str(r#"{"cmd":"rename","id":"x","title":"T"}"#).unwrap();
         assert_eq!(r, Request::Rename { id: "x".into(), title: "T".into(), confirm: true });
+        let r: Request = serde_json::from_str(r#"{"cmd":"import","manifest":"/r/import.json"}"#).unwrap();
+        assert_eq!(r, Request::Import { manifest: "/r/import.json".into() });
         let e = Event::Levels { me: 0.5, them: 0.25 };
         assert_eq!(serde_json::to_string(&e).unwrap(), r#"{"event":"levels","data":{"me":0.5,"them":0.25}}"#);
         let s = SessionView::Prompting { app: App::Discord, hint: None, since: 1 };

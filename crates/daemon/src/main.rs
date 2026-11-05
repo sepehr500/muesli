@@ -2,6 +2,7 @@
 
 mod ctx;
 mod detector;
+mod import;
 mod notify;
 mod pipeline;
 mod server;
@@ -283,6 +284,7 @@ async fn main() -> Result<()> {
         session_view: RwLock::new(SessionView::Idle),
         cmds: cmd_tx,
         jobs: Default::default(),
+        imports: Default::default(),
         notifier: notify::Notifier::new(actions_tx),
     });
 

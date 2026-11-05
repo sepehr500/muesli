@@ -3,7 +3,7 @@
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use muesli_core::ipc::{self, Event, Request, SessionView, Status};
-use muesli_core::{config, detect, model, store, transcript};
+use muesli_core::{config, detect, import, model, store, transcript};
 
 #[derive(Parser)]
 #[command(name = "muesli-cli", version, about = "Control muesli, the local meeting notes app")]
@@ -66,6 +66,17 @@ enum Cmd {
     SetKey {
         /// Omit to be prompted (keeps the key out of shell history); `-` reads stdin.
         key: Option<String>,
+    },
+    /// Import an external recording (e.g. a Discord bot's per-speaker WAVs) from an
+    /// `import.json` manifest. Returns once the audio is stored; notes follow in the background.
+    /// Idempotent per `source_id`. Exit codes: 0 stored (or already stored), 2 invalid
+    /// manifest/audio (don't retry), 1 other error (retry later). See docs/import.md.
+    Import {
+        /// Absolute path to the manifest.
+        #[arg(long)]
+        manifest: std::path::PathBuf,
+        #[arg(long)]
+        json: bool,
     },
     /// Debug: what does detection see right now?
     Detect,
@@ -141,9 +152,40 @@ fn print_event(e: &Event, json: bool) -> bool {
     writeln!(out, "{line}").and_then(|_| out.flush()).is_ok()
 }
 
+/// `import`: validate locally (so a bad manifest fails even with the daemon down), then hand
+/// the manifest path to the daemon, which copies the audio and replies.
+fn run_import(manifest: &std::path::Path) -> Result<import::ImportReply> {
+    anyhow::ensure!(manifest.is_absolute(), import::invalid(format!("manifest path {} is not absolute", manifest.display())));
+    let meta = std::fs::metadata(manifest).map_err(|e| import::invalid(format!("manifest {}: {e}", manifest.display())))?;
+    anyhow::ensure!(meta.len() <= import::MAX_MANIFEST_BYTES, import::invalid("manifest is larger than 1 MB"));
+    let json = std::fs::read_to_string(manifest).map_err(|e| import::invalid(format!("manifest: {e}")))?;
+    import::parse(&json)?.validate(store::now_ms())?;
+    Ok(serde_json::from_value(call(Request::Import { manifest: manifest.to_path_buf() })?)?)
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::Import { manifest, json } => match run_import(&manifest) {
+            Ok(r) => match json {
+                true => println!("{}", serde_json::to_string(&r)?),
+                false => println!(
+                    "{} {} ({})",
+                    if r.duplicate { "already imported as" } else { "imported" },
+                    r.id,
+                    r.state.as_str()
+                ),
+            },
+            Err(e) => {
+                let msg = format!("{e:#}");
+                let retryable = !import::is_invalid(&msg);
+                match json {
+                    true => println!("{}", serde_json::json!({ "error": msg, "retryable": retryable })),
+                    false => eprintln!("error: {msg}"),
+                }
+                std::process::exit(if retryable { 1 } else { 2 });
+            }
+        },
         Cmd::Status { json } => {
             let s = status()?;
             match json {

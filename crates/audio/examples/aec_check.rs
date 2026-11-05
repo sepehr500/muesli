@@ -24,7 +24,7 @@ fn main() -> anyhow::Result<()> {
     }
     std::fs::write(raw.join("recording.json"), serde_json::to_string(&capture::RecordingInfo {
         rate: 48_000, segment_secs: 300, duration_s: mic.len() as f64 / 48_000.0,
-        mic_segments: vec!["mic-000.opus".into()], sys_segments: vec!["sys-000.opus".into()], bytes: 0,
+        mic_segments: vec!["mic-000.opus".into()], sys_segments: vec!["sys-000.opus".into()], bytes: 0, tracks: vec![],
     })?)?;
     for aec in [false, true] {
         let dump = dir.join(format!("clean-mic-aec{aec}.opus"));
