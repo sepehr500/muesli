@@ -78,8 +78,32 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Hook scripts in ~/.config/muesli/hooks/<event>.d/ (see docs/hooks.md).
+    Hooks {
+        #[command(subcommand)]
+        cmd: HooksCmd,
+    },
     /// Debug: what does detection see right now?
     Detect,
+}
+
+#[derive(Subcommand)]
+enum HooksCmd {
+    /// Registered scripts per event.
+    List,
+    /// Run an event's scripts for a meeting now and wait for the results.
+    Run { event: String, id: String },
+    /// Recent runs (optionally for one meeting).
+    Log {
+        id: Option<String>,
+        #[arg(short, long, default_value_t = 20)]
+        n: usize,
+        /// Show each run's full output.
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// Queue an event's failed runs again.
+    Retry { event_id: String },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -87,6 +111,73 @@ enum OnOff {
     On,
     Off,
     Toggle,
+}
+
+fn print_run(r: &store::HookRun, verbose: bool) {
+    let mark = match r.status.as_str() {
+        "ok" => "✓",
+        "failed" => "✗",
+        _ if r.attempts > 0 => "↻",
+        _ => "…",
+    };
+    let when = chrono::DateTime::from_timestamp_millis(r.updated_at)
+        .map(|t| t.with_timezone(&chrono::Local).format("%b %-d %H:%M").to_string())
+        .unwrap_or_default();
+    let code = r.exit_code.map(|c| format!(" exit {c}")).unwrap_or_default();
+    println!("{mark} {when}  {}/{}  {}{code}  [{}]", r.event, r.script, r.meeting_id, r.event_id);
+    let lines: Vec<&str> = r.log.lines().collect();
+    let shown = match verbose {
+        true => &lines[..],
+        false => &lines[lines.len().saturating_sub(3)..],
+    };
+    shown.iter().for_each(|l| println!("    {l}"));
+}
+
+fn hooks_cmd(cmd: HooksCmd) -> Result<()> {
+    use muesli_core::hooks::{self, HookEvent};
+    match cmd {
+        HooksCmd::List => {
+            println!("{}", muesli_core::paths::hooks_dir().display());
+            for e in HookEvent::ALL {
+                let scripts = hooks::scripts(e);
+                println!("  {}.d/{}", e.name(), if scripts.is_empty() { "  (none)".to_string() } else { String::new() });
+                scripts.iter().for_each(|s| println!("    {s}"));
+            }
+        }
+        HooksCmd::Run { event, id } => {
+            let r = call(Request::RunHook { event: event.clone(), id })?;
+            let Some(ev) = r["event_id"].as_str().map(str::to_string) else {
+                bail!("no scripts registered for {event} (add one to {})", hooks::script_dir(HookEvent::parse(&event).expect("checked by daemon")).display());
+            };
+            let c = store::open_default()?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(330);
+            let runs = loop {
+                let runs = store::hook_runs_for_event(&c, &ev)?;
+                let settled = runs.iter().all(|r| r.status != "pending" || r.attempts > 0);
+                if settled || std::time::Instant::now() > deadline {
+                    break runs;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            };
+            runs.iter().for_each(|r| print_run(r, true));
+            if runs.iter().any(|r| r.status != "ok") {
+                std::process::exit(1);
+            }
+        }
+        HooksCmd::Log { id, n, verbose } => {
+            let c = store::open_default()?;
+            let runs = store::recent_hook_runs(&c, id.as_deref(), n)?;
+            if runs.is_empty() {
+                println!("No hook runs yet.");
+            }
+            runs.iter().for_each(|r| print_run(r, verbose));
+        }
+        HooksCmd::Retry { event_id } => {
+            let r = call(Request::RetryHook { event_id })?;
+            println!("requeued {}", r["requeued"]);
+        }
+    }
+    Ok(())
 }
 
 fn call(req: Request) -> Result<serde_json::Value> {
@@ -166,6 +257,7 @@ fn run_import(manifest: &std::path::Path) -> Result<import::ImportReply> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::Hooks { cmd } => hooks_cmd(cmd)?,
         Cmd::Import { manifest, json } => match run_import(&manifest) {
             Ok(r) => match json {
                 true => println!("{}", serde_json::to_string(&r)?),

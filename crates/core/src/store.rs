@@ -60,6 +60,28 @@ CREATE TABLE IF NOT EXISTS chats (
     created_at INTEGER NOT NULL
 );
 
+-- Hook outbox: every event is stored before its scripts run, so a crash or reboot can't lose
+-- it. Not tied to meetings by foreign key: meeting-deleted events outlive their meeting.
+CREATE TABLE IF NOT EXISTS hook_events (
+    id         TEXT PRIMARY KEY,
+    event      TEXT NOT NULL,
+    meeting_id TEXT NOT NULL,
+    payload    TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS hook_runs (
+    event_id   TEXT NOT NULL REFERENCES hook_events(id) ON DELETE CASCADE,
+    script     TEXT NOT NULL,
+    status     TEXT NOT NULL,          -- pending | ok | failed
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    next_at    INTEGER NOT NULL,
+    exit_code  INTEGER,
+    log        TEXT NOT NULL DEFAULT '',
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (event_id, script)
+);
+CREATE INDEX IF NOT EXISTS hook_runs_due ON hook_runs(status, next_at);
+
 -- Recordings imported from outside muesli (e.g. a Discord bot). `source_id` makes imports
 -- idempotent; `speakers` keeps the known per-track names for reprocessing and renames.
 CREATE TABLE IF NOT EXISTS imports (
@@ -198,6 +220,135 @@ pub fn confirm_pending_titles(c: &Connection) -> Result<usize> {
             let title = m.title.clone().unwrap_or_else(|| fallback_title(m.app, m.started_at));
             set_title(c, &m.id, &title, true).map(|_| n + 1)
         })
+}
+
+// ------------------------------------------------------------------ hooks
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HookRun {
+    pub event_id: String,
+    pub event: String,
+    pub meeting_id: String,
+    pub script: String,
+    pub status: String,
+    pub attempts: u32,
+    pub exit_code: Option<i32>,
+    pub log: String,
+    pub updated_at: i64,
+}
+
+/// Store an event and one pending run per script, atomically.
+pub fn insert_hook_event(
+    c: &mut Connection,
+    id: &str,
+    event: &str,
+    meeting_id: &str,
+    payload: &str,
+    scripts: &[String],
+) -> Result<()> {
+    let now = now_ms();
+    let tx = c.transaction()?;
+    tx.execute(
+        "INSERT INTO hook_events (id, event, meeting_id, payload, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, event, meeting_id, payload, now],
+    )?;
+    for s in scripts {
+        tx.execute(
+            "INSERT INTO hook_runs (event_id, script, status, next_at, updated_at) VALUES (?1, ?2, 'pending', ?3, ?3)",
+            params![id, s, now],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+const RUN_COLS: &str = "r.event_id, e.event, e.meeting_id, r.script, r.status, r.attempts, r.exit_code, r.log, r.updated_at";
+
+fn run_from_row(r: &Row) -> rusqlite::Result<HookRun> {
+    Ok(HookRun {
+        event_id: r.get(0)?,
+        event: r.get(1)?,
+        meeting_id: r.get(2)?,
+        script: r.get(3)?,
+        status: r.get(4)?,
+        attempts: r.get(5)?,
+        exit_code: r.get(6)?,
+        log: r.get(7)?,
+        updated_at: r.get(8)?,
+    })
+}
+
+/// Pending runs whose time has come, oldest event first, with their payloads.
+pub fn due_hook_runs(c: &Connection, now: i64) -> Result<Vec<(HookRun, String)>> {
+    let mut st = c.prepare(&format!(
+        "SELECT {RUN_COLS}, e.payload FROM hook_runs r JOIN hook_events e ON e.id = r.event_id
+         WHERE r.status = 'pending' AND r.next_at <= ?1 ORDER BY e.created_at, r.script"
+    ))?;
+    let rows = st.query_map([now], |r| Ok((run_from_row(r)?, r.get::<_, String>(9)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Earliest time a pending run becomes due.
+pub fn next_hook_due(c: &Connection) -> Result<Option<i64>> {
+    Ok(c.query_row("SELECT MIN(next_at) FROM hook_runs WHERE status = 'pending'", [], |r| r.get(0))?)
+}
+
+/// Record an attempt. `retry_at` keeps the run pending until then; otherwise it's final.
+pub fn finish_hook_run(
+    c: &Connection,
+    event_id: &str,
+    script: &str,
+    ok: bool,
+    exit_code: Option<i32>,
+    log: &str,
+    retry_at: Option<i64>,
+) -> Result<()> {
+    let status = match (ok, retry_at) {
+        (true, _) => "ok",
+        (false, Some(_)) => "pending",
+        (false, None) => "failed",
+    };
+    c.execute(
+        "UPDATE hook_runs SET status=?3, attempts=attempts+1, exit_code=?4, log=?5, next_at=?6, updated_at=?7
+         WHERE event_id=?1 AND script=?2",
+        params![event_id, script, status, exit_code, log, retry_at.unwrap_or(0), now_ms()],
+    )?;
+    Ok(())
+}
+
+/// Queue an event's failed runs again. Returns how many.
+pub fn retry_hook_event(c: &Connection, event_id: &str) -> Result<usize> {
+    Ok(c.execute(
+        "UPDATE hook_runs SET status='pending', attempts=0, next_at=?2 WHERE event_id=?1 AND status='failed'",
+        params![event_id, now_ms()],
+    )?)
+}
+
+pub fn hook_runs_for_event(c: &Connection, event_id: &str) -> Result<Vec<HookRun>> {
+    let mut st = c.prepare(&format!(
+        "SELECT {RUN_COLS} FROM hook_runs r JOIN hook_events e ON e.id = r.event_id WHERE r.event_id = ?1 ORDER BY r.script"
+    ))?;
+    let rows = st.query_map([event_id], run_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Most recent runs, optionally for one meeting.
+pub fn recent_hook_runs(c: &Connection, meeting_id: Option<&str>, limit: usize) -> Result<Vec<HookRun>> {
+    let mut st = c.prepare(&format!(
+        "SELECT {RUN_COLS} FROM hook_runs r JOIN hook_events e ON e.id = r.event_id
+         WHERE ?1 IS NULL OR e.meeting_id = ?1 ORDER BY r.updated_at DESC LIMIT ?2"
+    ))?;
+    let rows = st.query_map(params![meeting_id, limit as i64], run_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Drop finished events older than `cutoff` (keeps the outbox small).
+pub fn prune_hook_events(c: &Connection, cutoff: i64) -> Result<usize> {
+    Ok(c.execute(
+        "DELETE FROM hook_events WHERE created_at < ?1
+         AND NOT EXISTS (SELECT 1 FROM hook_runs r WHERE r.event_id = hook_events.id AND r.status = 'pending')",
+        [cutoff],
+    )?)
 }
 
 pub fn delete_meeting(c: &Connection, id: &str) -> Result<()> {
@@ -377,6 +528,25 @@ mod tests {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
         c
+    }
+
+    #[test]
+    fn hook_outbox() {
+        let mut c = mem();
+        insert_hook_event(&mut c, "ev1", "meeting-ready", "m1", "{}", &["a.sh".into(), "b.sh".into()]).unwrap();
+        let due = due_hook_runs(&c, now_ms()).unwrap();
+        assert_eq!(due.iter().map(|(r, _)| r.script.as_str()).collect::<Vec<_>>(), vec!["a.sh", "b.sh"]);
+        finish_hook_run(&c, "ev1", "a.sh", true, Some(0), "", None).unwrap();
+        finish_hook_run(&c, "ev1", "b.sh", false, Some(1), "boom", Some(now_ms() + 60_000)).unwrap();
+        assert!(due_hook_runs(&c, now_ms()).unwrap().is_empty(), "retry is in the future");
+        assert_eq!(due_hook_runs(&c, now_ms() + 61_000).unwrap().len(), 1);
+        finish_hook_run(&c, "ev1", "b.sh", false, Some(1), "boom", None).unwrap();
+        let runs = hook_runs_for_event(&c, "ev1").unwrap();
+        assert_eq!((runs[1].status.as_str(), runs[1].attempts, runs[1].log.as_str()), ("failed", 2, "boom"));
+        assert_eq!(retry_hook_event(&c, "ev1").unwrap(), 1);
+        assert_eq!(due_hook_runs(&c, now_ms()).unwrap().len(), 1);
+        assert_eq!(recent_hook_runs(&c, Some("m1"), 10).unwrap().len(), 2);
+        assert_eq!(prune_hook_events(&c, now_ms() + 1).unwrap(), 0, "pending runs are kept");
     }
 
     #[test]

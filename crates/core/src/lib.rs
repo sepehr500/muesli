@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod detect;
+pub mod hooks;
 pub mod import;
 pub mod ipc;
 pub mod model;

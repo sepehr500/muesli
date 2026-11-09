@@ -50,6 +50,16 @@ pub fn meeting_dir(id: &str) -> PathBuf {
     meetings_dir().join(id)
 }
 
+/// Hook scripts: `hooks/<event>.d/<script>`.
+pub fn hooks_dir() -> PathBuf {
+    config_dir().join("hooks")
+}
+
+/// Files written for hook scripts (notes, transcript, meeting.json).
+pub fn export_dir(id: &str) -> PathBuf {
+    meeting_dir(id).join("export")
+}
+
 /// Mixed playback pieces for a meeting (see `muesli_audio::playback`).
 pub fn playback_dir(id: &str) -> PathBuf {
     meeting_dir(id).join("playback")

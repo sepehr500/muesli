@@ -52,6 +52,11 @@ pub enum Request {
     /// see `crate::import`). Replies with `ImportReply` once the audio is copied into muesli's
     /// storage; processing continues in the background. Idempotent per `source_id`.
     Import { manifest: std::path::PathBuf },
+    /// Queue a hook event for a meeting now (testing scripts, backfilling). Replies
+    /// `{"event_id": ...}`, or `{"event_id": null}` when no script is registered.
+    RunHook { event: String, id: MeetingId },
+    /// Queue an event's failed hook runs again.
+    RetryHook { event_id: String },
 }
 
 fn yes() -> bool {

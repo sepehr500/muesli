@@ -97,6 +97,7 @@ pub async fn run(ctx: Arc<Ctx>, id: String, enhance_only: bool) {
                 &format!("{} — {}", m.display_title(), short_error(&e)),
                 &[(&format!("reprocess:{id}"), "Retry"), (&format!("open:{id}"), "Open")],
             );
+            crate::hooks::emit_logged(&ctx, muesli_core::hooks::HookEvent::MeetingFailed, &id);
         }
     }
 }
@@ -311,6 +312,7 @@ async fn steps(ctx: &Arc<Ctx>, id: &str, enhance_only: bool) -> Result<()> {
 
     m.state = MeetingState::Ready;
     save(ctx, &mut m)?;
+    crate::hooks::emit_logged(ctx, muesli_core::hooks::HookEvent::MeetingReady, id);
     if !enhance_only {
         ctx.notifier.info("Notes ready", &m.display_title(), &[(&format!("open:{id}"), "Open notes")]);
     }

@@ -2,6 +2,7 @@
 
 mod ctx;
 mod detector;
+mod hooks;
 mod import;
 mod notify;
 mod pipeline;
@@ -69,6 +70,7 @@ fn begin(ctx: &Ctx, app: Option<detect::App>, hint: Option<String>) -> Result<Ac
     if let Err(e) = ctx.save(&m) {
         tracing::error!("save meeting: {e}");
     }
+    hooks::emit_logged(ctx, muesli_core::hooks::HookEvent::RecordingStarted, &m.id);
     Ok(Active { meeting: m, recorder })
 }
 
@@ -95,6 +97,7 @@ async fn finish(ctx: Arc<Ctx>, a: Active, discard: bool) {
     });
     m.state = MeetingState::Processing;
     let _ = ctx.save(&m);
+    hooks::emit_logged(&ctx, muesli_core::hooks::HookEvent::RecordingStopped, &m.id);
     tokio::spawn(pipeline::run(ctx.clone(), m.id.clone(), false));
 }
 
@@ -185,6 +188,10 @@ async fn session_loop(
                 a => {
                     if let Some(id) = a.strip_prefix("open:") {
                         let _ = std::process::Command::new("muesli").args(["--meeting", id]).spawn();
+                    } else if let Some(ev) = a.strip_prefix("hooks-retry:") {
+                        if ctx.db(|c| store::retry_hook_event(c, ev)).is_ok() {
+                            ctx.hooks_wake.notify_one();
+                        }
                     } else if let Some(id) = a.strip_prefix("reprocess:") {
                         tokio::spawn(pipeline::run(ctx.clone(), id.to_string(), false));
                     }
@@ -285,6 +292,7 @@ async fn main() -> Result<()> {
         cmds: cmd_tx,
         jobs: Default::default(),
         imports: Default::default(),
+        hooks_wake: tokio::sync::Notify::new(),
         notifier: notify::Notifier::new(actions_tx),
     });
 
@@ -309,6 +317,7 @@ async fn main() -> Result<()> {
     prune_audio(&ctx);
 
     let _detector = detector::spawn(nodes_tx);
+    tokio::spawn(hooks::runner(ctx.clone()));
     let session = tokio::spawn(session_loop(ctx.clone(), nodes_rx, cmd_rx, actions_rx));
 
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;

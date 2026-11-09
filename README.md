@@ -82,6 +82,10 @@ meeting, not a monthly fee.
   styled by your current theme.
 - **Featherweight.** The background service idles at about 11 MB of memory and 0% CPU. The app
   is native GTK4 / libadwaita. No Electron, no webview, no muesli account.
+- **Hooks for everything else.** Drop a script in `~/.config/muesli/hooks/meeting-ready.d/`
+  and it runs when notes are done, with the meeting as JSON. A [Notion sync](hooks/notion-sync.py)
+  ships as the example: one database page per meeting, kept up to date. See
+  [docs/hooks.md](docs/hooks.md).
 - **Crash-proof recording.** Audio is written in small Opus segments that survive a crash or a
   dead battery; processing picks up where it left off.
 
@@ -175,6 +179,7 @@ muesli-cli rename <id> "Title"
 muesli-cli rename-speaker <id> "Speaker 2" "Lena"
 muesli-cli reprocess <id> | enhance <id> | delete <id>
 muesli-cli import --manifest /abs/import.json --json   add an external recording (docs/import.md)
+muesli-cli hooks list | run | log | retry     hook scripts (docs/hooks.md)
 muesli-cli detect                             debug: what the call detector sees
 ```
 

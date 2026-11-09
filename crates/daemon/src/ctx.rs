@@ -27,6 +27,8 @@ pub struct Ctx {
     /// Serializes imports (source_id check + claim).
     pub imports: tokio::sync::Mutex<()>,
     pub notifier: crate::notify::Notifier,
+    /// Wakes the hook runner when an event is queued.
+    pub hooks_wake: tokio::sync::Notify,
 }
 
 impl Ctx {

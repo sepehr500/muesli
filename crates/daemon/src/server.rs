@@ -4,6 +4,7 @@ use crate::ctx::{Ctx, SessionCmd};
 use anyhow::Result;
 use muesli_core::ipc::{Event, Request, Response, SessionView};
 use muesli_core::model::{StepKind, StepStatus, fallback_title};
+use muesli_core::hooks::{self, HookEvent};
 use muesli_core::{config, paths, prompts, session, store, transcript};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -101,6 +102,7 @@ async fn handle(ctx: &Arc<Ctx>, req: Request) -> Result<Response> {
             anyhow::ensure!(!title.is_empty(), "title can't be empty");
             ctx.db(|c| store::set_title(c, &id, title, confirm))?;
             ctx.meeting_updated(&id);
+            crate::hooks::emit_logged(ctx, HookEvent::MeetingUpdated, &id);
             Ok(Response::empty())
         }
         Request::ConfirmTitle { id } => {
@@ -157,6 +159,7 @@ async fn handle(ctx: &Arc<Ctx>, req: Request) -> Result<Response> {
             }
             ctx.save(&m)?;
             ctx.meeting_updated(&id);
+            crate::hooks::emit_logged(ctx, HookEvent::MeetingUpdated, &id);
             Ok(Response::empty())
         }
         Request::PreparePlayback { id } => {
@@ -176,12 +179,34 @@ async fn handle(ctx: &Arc<Ctx>, req: Request) -> Result<Response> {
             let recording = matches!(&*ctx.session_view.read().expect("view"),
                 SessionView::Recording { meeting_id, .. } if *meeting_id == id);
             anyhow::ensure!(!recording, "stop the recording first");
+            // Snapshot before deleting: scripts still need to know which meeting it was.
+            let snap = (!hooks::scripts(HookEvent::MeetingDeleted).is_empty())
+                .then(|| crate::hooks::snapshot(ctx, HookEvent::MeetingDeleted, &id).ok())
+                .flatten();
             ctx.db(|c| store::delete_meeting(c, &id))?;
             let _ = std::fs::remove_dir_all(paths::meeting_dir(&id));
             ctx.meeting_updated(&id);
+            if let Some((meeting, _)) = snap
+                && let Err(e) = crate::hooks::emit_with(ctx, HookEvent::MeetingDeleted, &id, meeting, None)
+            {
+                tracing::warn!("hook meeting-deleted for {id} not queued: {e:#}");
+            }
             Ok(Response::empty())
         }
         Request::Import { manifest } => Ok(Response::ok(crate::import::import(ctx, manifest).await?)),
+        Request::RunHook { event, id } => {
+            let ev = HookEvent::parse(&event).ok_or_else(|| {
+                let names: Vec<_> = HookEvent::ALL.iter().map(|e| e.name()).collect();
+                anyhow::anyhow!("unknown event {event:?} (one of: {})", names.join(", "))
+            })?;
+            let event_id = crate::hooks::emit(ctx, ev, &id)?;
+            Ok(Response::ok(serde_json::json!({ "event_id": event_id })))
+        }
+        Request::RetryHook { event_id } => {
+            let n = ctx.db(|c| store::retry_hook_event(c, &event_id))?;
+            ctx.hooks_wake.notify_one();
+            Ok(Response::ok(serde_json::json!({ "requeued": n })))
+        }
         Request::ReloadConfig => {
             *ctx.cfg.write().expect("cfg") = config::Config::load();
             ctx.broadcast_status();

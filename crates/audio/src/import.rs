@@ -216,7 +216,7 @@ impl Pcm16 {
         while at < out.len() && self.left > 0 {
             let n = (out.len() - at).min(self.left as usize).min(self.buf.len() / 2);
             self.r.read_exact(&mut self.buf[..n * 2])?;
-            for (o, b) in out[at..at + n].iter_mut().zip(self.buf[..n * 2].chunks_exact(2)) {
+            for (o, b) in out[at..at + n].iter_mut().zip(self.buf[..n * 2].as_chunks::<2>().0.iter()) {
                 *o += i16::from_le_bytes([b[0], b[1]]) as f32 / 32_768.0;
             }
             at += n;
