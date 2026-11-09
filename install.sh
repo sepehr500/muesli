@@ -22,6 +22,9 @@ install -m755 target/release/muesli-daemon target/release/muesli-cli target/rele
 install -m644 packaging/dev.muesli.Muesli.desktop "$HOME/.local/share/applications/"
 install -m644 packaging/dev.muesli.Muesli.svg "$HOME/.local/share/icons/hicolor/scalable/apps/"
 install -m644 packaging/muesli-daemon.service "$HOME/.config/systemd/user/"
+# Bundled hook scripts (opt in by linking them from ~/.config/muesli/hooks/<event>.d/).
+install -d "$HOME/.local/share/muesli/hooks"
+install -m755 hooks/*.py "$HOME/.local/share/muesli/hooks/"
 
 # Omarchy bar plugin (if Omarchy shell is present).
 if [ -d "$HOME/.config/omarchy" ] && [ -d omarchy-plugin/ssobhani.muesli ]; then

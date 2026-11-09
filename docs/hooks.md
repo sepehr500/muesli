@@ -106,13 +106,15 @@ moves the page to Notion's trash.
 2. Create a database with these properties: Name (title), Date (date), App (select),
    Duration (min) (number), People (multi-select), To-dos (number), Muesli ID (text).
 3. Find its data source ID: `ntn datasources resolve <database-id>`.
-4. Install:
+4. Link it for the three events. `install.sh` puts bundled scripts in
+   `~/.local/share/muesli/hooks/`, so linking there keeps you on the latest version:
 
 ```bash
 H=~/.config/muesli/hooks
 mkdir -p $H/meeting-ready.d $H/meeting-updated.d $H/meeting-deleted.d
-install -m 755 hooks/notion-sync.py $H/notion-sync.py
-for e in meeting-ready meeting-updated meeting-deleted; do ln -sfn ../notion-sync.py $H/$e.d/50-notion.py; done
+for e in meeting-ready meeting-updated meeting-deleted; do
+  ln -sfn ~/.local/share/muesli/hooks/notion-sync.py $H/$e.d/50-notion.py
+done
 echo '{"data_source_id": "<id>"}' > ~/.config/muesli/notion.json
 ```
 
