@@ -273,11 +273,11 @@ mod tests {
 
     #[test]
     fn script_filter() {
-        assert!(is_hook_script("10-notion.py"));
+        assert!(is_hook_script("10-sync.py"));
         assert!(!is_hook_script(".hidden"));
-        assert!(!is_hook_script("notion.py~"));
-        assert!(!is_hook_script("notion.sample"));
-        assert!(!is_hook_script("notion.py.disabled"));
+        assert!(!is_hook_script("sync.py~"));
+        assert!(!is_hook_script("sync.sample"));
+        assert!(!is_hook_script("sync.py.disabled"));
     }
 
     #[test]

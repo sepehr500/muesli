@@ -83,9 +83,8 @@ meeting, not a monthly fee.
 - **Featherweight.** The background service idles at about 11 MB of memory and 0% CPU. The app
   is native GTK4 / libadwaita. No Electron, no webview, no muesli account.
 - **Hooks for everything else.** Drop a script in `~/.config/muesli/hooks/meeting-ready.d/`
-  and it runs when notes are done, with the meeting as JSON. A [Notion sync](hooks/notion-sync.py)
-  ships as the example: one database page per meeting, kept up to date. See
-  [docs/hooks.md](docs/hooks.md).
+  and it runs when notes are done, with the meeting as JSON: copy notes into your wiki or
+  vault, post to chat, file to-dos in your tracker. See [docs/hooks.md](docs/hooks.md).
 - **Crash-proof recording.** Audio is written in small Opus segments that survive a crash or a
   dead battery; processing picks up where it left off.
 

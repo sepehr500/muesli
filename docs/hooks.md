@@ -1,14 +1,14 @@
 # Hooks
 
-Run your own scripts when something happens to a meeting: push notes to Notion, copy them
-into a notes vault, upload audio, post to Slack.
+Run your own scripts when something happens to a meeting: copy notes into a wiki or notes
+vault, post a summary to chat, file to-dos in your tracker.
 
 Put an executable file in the folder named after the event:
 
 ```
 ~/.config/muesli/hooks/
   meeting-ready.d/
-    50-notion.py
+    50-vault.sh
   recording-started.d/
     10-slack-status.sh
 ```
@@ -94,33 +94,23 @@ muesli-cli hooks retry <event-id>          queue an event's failed runs again
 
 `hooks run` is the way to develop a script: write it, then try it on yesterday's meeting.
 
-## Example: Notion
-
-[`hooks/notion-sync.py`](../hooks/notion-sync.py) keeps one page per meeting in a Notion
-database using Notion's official CLI, [`ntn`](https://www.npmjs.com/package/ntn). Each page
-has Date, App, Duration, People and open To-dos columns, the notes with source timestamps,
-and the transcript in a collapsed toggle. Renames update the page; deleting the meeting
-moves the page to Notion's trash.
-
-1. `ntn login`
-2. Create a database with these properties: Name (title), Date (date), App (select),
-   Duration (min) (number), People (multi-select), To-dos (number), Muesli ID (text).
-3. Find its data source ID: `ntn datasources resolve <database-id>`.
-4. Link it for the three events. `install.sh` puts bundled scripts in
-   `~/.local/share/muesli/hooks/`, so linking there keeps you on the latest version:
+## Example: post to a webhook
 
 ```bash
-H=~/.config/muesli/hooks
-mkdir -p $H/meeting-ready.d $H/meeting-updated.d $H/meeting-deleted.d
-for e in meeting-ready meeting-updated meeting-deleted; do
-  ln -sfn ~/.local/share/muesli/hooks/notion-sync.py $H/$e.d/50-notion.py
-done
-echo '{"data_source_id": "<id>"}' > ~/.config/muesli/notion.json
+#!/bin/sh
+# meeting-ready.d/50-webhook.sh: send the title and open to-dos to a chat webhook.
+jq '{text: "\(.meeting.title): \(.meeting.todos.open) open to-dos"}' \
+  | curl -fsS -H 'Content-Type: application/json' -d @- "$WEBHOOK_URL"
 ```
 
-Add `"apps": ["zoom"]` to `notion.json` to sync only some kinds of call (`zoom`, `discord`,
-`manual`). To send meetings you already have:
+The payload arrives on stdin, so `jq` can read it directly. Scripts that update an outside
+copy (a wiki page, a database row) should key it on `meeting.id` and handle
+`meeting-updated` and `meeting-deleted` too, so renames and deletes follow.
+
+To run a script on meetings you already have:
 
 ```bash
-for id in $(muesli-cli list --limit 1000 --json | jq -r '.[] | select(.state == "ready") | .id'); do muesli-cli hooks run meeting-ready $id; done
+for id in $(muesli-cli list --limit 1000 --json | jq -r '.[] | select(.state == "ready") | .id'); do
+  muesli-cli hooks run meeting-ready $id
+done
 ```
