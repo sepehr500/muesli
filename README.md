@@ -130,8 +130,9 @@ PipeWire events ──► detector ──► record / ask ──► recorder: yo
 - A notification daemon that supports action buttons (Omarchy, GNOME, KDE, mako and dunst do).
 - **Hyprland** for detecting calls in the browser (it reads window titles). Native Zoom and
   Discord apps are detected on any desktop.
-- Rust (stable) to build. Echo cancellation links the system `webrtc-audio-processing` ≥ 2.1
-  if present, otherwise builds it from source (needs `meson` and `ninja`).
+- Rust (stable) to build. Echo cancellation links the system `webrtc-audio-processing` ≥ 2.1.
+  Without it, `install.sh` builds it from source instead, which needs `meson` and `ninja`
+  (plain `cargo` needs `--features muesli-daemon/aec-bundled` for that, see Development).
 
 Developed and tested on [Omarchy](https://omarchy.org) (Arch + Hyprland). Other distros and
 desktops should mostly work, minus browser-call detection outside Hyprland.
@@ -241,7 +242,8 @@ Custom note sections: put a template in `~/.config/muesli/templates/default.md`.
 | `omarchy-plugin/` | Omarchy shell bar widget and panel (QML) |
 
 ```bash
-cargo test --workspace
+cargo test --workspace                                         # with system webrtc-audio-processing
+cargo test --workspace --features muesli-daemon/aec-bundled    # without it (needs meson + ninja)
 MUESLI_HOME=/tmp/muesli-dev ./target/debug/muesli-daemon      # isolated config, data and socket
 MUESLI_HOME=/tmp/muesli-dev cargo run -p muesli-ui --example seed   # demo meetings for the app
 ```
